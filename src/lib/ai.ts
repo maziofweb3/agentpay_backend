@@ -113,6 +113,12 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
 
   // AgentRouter sometimes returns the payload as a JSON string (occasionally double-encoded).
   for (let i = 0; i < 2 && typeof resObj === "string"; i++) {
+    if (resObj.trim().toLowerCase().startsWith("<!doctype") || resObj.toLowerCase().includes("aliyun_waf") || resObj.trim().toLowerCase().startsWith("<html")) {
+      throw new AIGatewayError(
+        "AI gateway returned an HTML firewall verification page (WAF challenge)",
+        "network"
+      );
+    }
     try {
       resObj = JSON.parse(resObj);
     } catch {
