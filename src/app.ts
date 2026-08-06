@@ -1,6 +1,10 @@
+import { config } from "dotenv";
+
+config({ path: ".env.local" });
+config({ path: ".env" });
+
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
-import { config } from "dotenv";
 import { paymentMiddleware } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { x402ResourceServer, RoutesConfig } from "@x402/core/server";
@@ -18,8 +22,6 @@ import { validateTextField, preview, aiErrorStatus, aiErrorHint } from "./lib/va
 import { handleCreditsDeposit } from "./lib/prepaid-ledger.js";
 import { formatReputationSummary } from "./lib/erc8004.js";
 import { appendAttributionTag } from "./lib/attribution.js";
-
-config();
 
 const app = express();
 
