@@ -90,7 +90,7 @@ const apayAddress = (
   process.env.APAY_TOKEN_ADDRESS ||
   (isMainnet
     ? "0x6A96C2755E8D88b1b369C9F3C6415B17B03eA44E"
-    : "0x3A521255e2d6345A9521f58B5542718E298d752B")
+    : "0x8bC64020EAcAB7321be0d5060538e04B54049363")
 ) as `0x${string}`;
 
 const defaultProxyVaultAddress = "0xc1eBB154EFf9bf9c08e39978E1447cC05e726dC6" as `0x${string}`;
