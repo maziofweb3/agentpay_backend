@@ -7,6 +7,7 @@ export type ActivityLevel = "info" | "warn" | "error";
 
 export type ActivityEvent =
   | "server.start"
+  | "request.access"
   | "payment.challenge"
   | "payment.transfer_ok"
   | "payment.transfer_fail"

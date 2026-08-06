@@ -51,6 +51,27 @@ app.use(
 
 app.use(express.json());
 
+// Request Access Logging Middleware
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const start = Date.now();
+  const method = req.method;
+  const url = req.originalUrl || req.url;
+  
+  res.on("finish", () => {
+    const durationMs = Date.now() - start;
+    activity("request.access", {
+      method,
+      path: url,
+      status: res.statusCode,
+      durationMs,
+      ip: (req.headers["x-forwarded-for"] as string)?.split(",")[0] || req.socket?.remoteAddress || null,
+      userAgent: req.headers["user-agent"] || null,
+    });
+  });
+
+  next();
+});
+
 const rawNetworkEnv = process.env.X402_NETWORK ?? "testnet";
 const rawNetwork = rawNetworkEnv === "mainnet" || rawNetworkEnv === "testnet" ? rawNetworkEnv : "testnet";
 const isMainnet = rawNetwork === "mainnet";
