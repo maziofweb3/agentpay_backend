@@ -34,7 +34,7 @@ export interface PaidRoutePrice {
 
 export interface VerifyTransferParams {
   txHash: string;
-  usdtAddress: `0x${string}`;
+  apayAddress: `0x${string}`;
   payTo: `0x${string}`;
   minAmountAtomic: bigint;
   chainId: number;
@@ -71,12 +71,8 @@ export function _resetSpentTxHashesForTests(): void {
 }
 
 /**
- * Verify an on-chain USDT transfer pays at least `minAmountAtomic` to `payTo`.
+ * Verify an on-chain APAY transfer pays at least `minAmountAtomic` to `payTo`.
  * Throws a user-facing Error on failure.
- *
- * Does NOT mark the tx as spent — call `consumePaymentTx` only after the
- * paid handler returns success. Otherwise a timed-out AI call burns a valid
- * payment and retries return 402 "already used".
  */
 export async function verifyUsdtTransferPayment(
   params: VerifyTransferParams
@@ -107,14 +103,14 @@ export async function verifyUsdtTransferPayment(
     throw new Error("Payment transaction failed on-chain.");
   }
 
-  const usdt = params.usdtAddress.toLowerCase();
+  const apay = params.apayAddress.toLowerCase();
   const payTo = params.payTo.toLowerCase();
 
   let totalToVault = BigInt(0);
   let from: `0x${string}` | null = null;
 
   for (const log of receipt.logs as Log[]) {
-    if ((log.address ?? "").toLowerCase() !== usdt) continue;
+    if ((log.address ?? "").toLowerCase() !== apay) continue;
     try {
       const decoded = decodeEventLog({
         abi: [transferEvent],
@@ -133,7 +129,7 @@ export async function verifyUsdtTransferPayment(
 
   if (totalToVault < params.minAmountAtomic) {
     throw new Error(
-      `Insufficient USDT paid. Need ${params.minAmountAtomic.toString()} atomic units, ` +
+      `Insufficient APAY paid. Need ${params.minAmountAtomic.toString()} atomic units, ` +
         `found ${totalToVault.toString()} to vault ${params.payTo}.`
     );
   }

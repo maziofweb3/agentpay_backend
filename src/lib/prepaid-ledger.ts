@@ -188,7 +188,7 @@ export async function handleCreditsDeposit(
     const { activity } = await import("./activity-log.js");
     const verified = await verifyUsdtTransferPayment({
       txHash,
-      usdtAddress: opts.usdtAddress as `0x${string}`,
+      apayAddress: opts.usdtAddress as `0x${string}`,
       payTo: opts.payTo as `0x${string}`,
       minAmountAtomic: BigInt(1),
       chainId: opts.chainId,

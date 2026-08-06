@@ -86,10 +86,11 @@ const activeRpcUrl = isMainnet
   ? process.env.BOTCHAIN_RPC_URL || "https://rpc.botchain.ai"
   : process.env.BOTCHAIN_RPC_URL || "https://rpc.bohr.life";
 
-const usdtAddress = (
-  isMainnet
-    ? "0xaBabc7Ddc03e501d190C676BF3d92ef0e6e87a3C"
-    : "0x75edC9335175Fc0552D51D48439F229c10420fe3"
+const apayAddress = (
+  process.env.APAY_TOKEN_ADDRESS ||
+  (isMainnet
+    ? "0x6A96C2755E8D88b1b369C9F3C6415B17B03eA44E"
+    : "0x3A521255e2d6345A9521f58B5542718E298d752B")
 ) as `0x${string}`;
 
 const defaultProxyVaultAddress = "0xc1eBB154EFf9bf9c08e39978E1447cC05e726dC6" as `0x${string}`;
@@ -107,10 +108,10 @@ for (const network of extraNetworks) {
 }
 
 const routePrices: Record<string, string> = {
-  "POST /api/chat": "10000",
-  "POST /api/image": "50000",
-  "POST /api/code": "20000",
-  "POST /api/botchain/relay": "10000",
+  "POST /api/chat": "1000000000000000000", // 1.0 APAY
+  "POST /api/image": "5000000000000000000", // 5.0 APAY
+  "POST /api/code": "2000000000000000000", // 2.0 APAY
+  "POST /api/botchain/relay": "1000000000000000000", // 1.0 APAY
 };
 
 const routes: RoutesConfig = {
@@ -121,11 +122,11 @@ const routes: RoutesConfig = {
       payTo: payToAddress,
       price: {
         amount: routePrices["POST /api/chat"],
-        asset: usdtAddress,
-        extra: { name: "USDT", version: "1" },
+        asset: apayAddress,
+        extra: { name: "AgentPay Token", version: "1" },
       },
     },
-    description: "Claude AI Chat Prompt ($0.01 USDT)",
+    description: "Claude AI Chat Prompt (1.0 $APAY)",
   },
   "POST /api/image": {
     accepts: {
@@ -134,11 +135,11 @@ const routes: RoutesConfig = {
       payTo: payToAddress,
       price: {
         amount: routePrices["POST /api/image"],
-        asset: usdtAddress,
-        extra: { name: "USDT", version: "1" },
+        asset: apayAddress,
+        extra: { name: "AgentPay Token", version: "1" },
       },
     },
-    description: "AI Image Generation ($0.05 USDT)",
+    description: "AI Image Generation (5.0 $APAY)",
   },
   "POST /api/code": {
     accepts: {
@@ -147,11 +148,11 @@ const routes: RoutesConfig = {
       payTo: payToAddress,
       price: {
         amount: routePrices["POST /api/code"],
-        asset: usdtAddress,
-        extra: { name: "USDT", version: "1" },
+        asset: apayAddress,
+        extra: { name: "AgentPay Token", version: "1" },
       },
     },
-    description: "AI Code Security & Audit ($0.02 USDT)",
+    description: "AI Code Security & Audit (2.0 $APAY)",
   },
   "POST /api/botchain/relay": {
     accepts: {
@@ -160,11 +161,11 @@ const routes: RoutesConfig = {
       payTo: payToAddress,
       price: {
         amount: routePrices["POST /api/botchain/relay"],
-        asset: usdtAddress,
-        extra: { name: "USDT", version: "1" },
+        asset: apayAddress,
+        extra: { name: "AgentPay Token", version: "1" },
       },
     },
-    description: "BotChain Autonomous Agent Programmatic Relay ($0.01 USDT)",
+    description: "BotChain Autonomous Agent Programmatic Relay (1.0 $APAY)",
   },
 };
 
@@ -180,10 +181,10 @@ const healthHandler = (_req: Request, res: Response) => {
     model: getActiveModel(),
     network: activeBotChainCaip,
     chainId: activeChainId,
-    usdtAsset: usdtAddress,
-    paymentAsset: "USDT",
+    apayAsset: apayAddress,
+    paymentAsset: "APAY",
     paymentAssetOnly: true,
-    paymentMethods: ["prepaid-session", "usdt-transfer", "x402-exact"],
+    paymentMethods: ["prepaid-session", "x402-exact-eip3009"],
     paymentTxHeader: "X-AgentPay-Payment-Tx",
     sessionHeader: "Authorization: Bearer <sessionToken>",
     creditsDeposit: "/api/credits/deposit",
@@ -218,7 +219,7 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const result = await verifyUsdtTransferPayment({
         txHash,
-        usdtAddress,
+        apayAddress,
         payTo: payToAddress,
         minAmountAtomic: requiredAmount,
         chainId: activeChainId,
@@ -430,7 +431,7 @@ app.post("/api/attribution", async (req: Request, res: Response) => {
 
 app.post("/api/credits/deposit", async (req: Request, res: Response) => {
   return handleCreditsDeposit(req, res, {
-    usdtAddress,
+    usdtAddress: apayAddress,
     payTo: payToAddress,
     chainId: activeChainId,
     rpcUrl: activeRpcUrl,
