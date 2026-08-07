@@ -20,9 +20,11 @@ export type AIResult =
   | { ok: true; text: string; model: string; inputTokens: number; outputTokens: number; truncated: boolean }
   | { ok: false; errorType: AIErrorType; error: string };
 
-/** Resolved model id, exported so routes and /health report what is actually in use. */
+/** Resolved model id from environment. */
 export function getActiveModel(): string {
-  return process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+  const model = process.env.ANTHROPIC_MODEL;
+  if (!model) throw new Error("FATAL: ANTHROPIC_MODEL environment variable is missing");
+  return model;
 }
 
 function isPlaceholderKey(key: string): boolean {
@@ -49,7 +51,9 @@ let cachedClientKey: string | null = null;
  */
 function getAnthropicClient(): Anthropic | null {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || isPlaceholderKey(apiKey)) return null;
+  if (!apiKey || isPlaceholderKey(apiKey)) {
+    throw new Error("FATAL: ANTHROPIC_API_KEY environment variable is missing or placeholder");
+  }
 
   const baseURL = resolveBaseURL(apiKey);
   const cacheKey = `${apiKey}|${baseURL ?? "default"}`;

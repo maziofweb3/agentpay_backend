@@ -81,19 +81,18 @@ const botChainTestnetCaip = "eip155:968" as const;
 const botChainMainnetCaip = "eip155:677" as const;
 const activeBotChainCaip = isMainnet ? botChainMainnetCaip : botChainTestnetCaip;
 const activeChainId = isMainnet ? 677 : 968;
-const activeRpcUrl = isMainnet
-  ? process.env.BOTCHAIN_RPC_URL || "https://rpc.botchain.ai"
-  : process.env.BOTCHAIN_RPC_URL || "https://rpc.bohr.life";
 
-const apayAddress = (
-  process.env.APAY_TOKEN_ADDRESS ||
-  (isMainnet
-    ? "0x6A96C2755E8D88b1b369C9F3C6415B17B03eA44E"
-    : "0xFd7bF688d5a772A81DfE39da502F69FD99cE92c7")
-) as `0x${string}`;
+const rpcUrlEnv = process.env.BOTCHAIN_RPC_URL;
+if (!rpcUrlEnv) throw new Error("FATAL: BOTCHAIN_RPC_URL environment variable is missing");
+const activeRpcUrl = rpcUrlEnv;
 
-const defaultProxyVaultAddress = "0xc1eBB154EFf9bf9c08e39978E1447cC05e726dC6" as `0x${string}`;
-const payToAddress = (process.env.PAYMENT_RECIPIENT_ADDRESS as `0x${string}`) || defaultProxyVaultAddress;
+const apayEnv = process.env.APAY_TOKEN_ADDRESS;
+if (!apayEnv) throw new Error("FATAL: APAY_TOKEN_ADDRESS environment variable is missing");
+const apayAddress = apayEnv as `0x${string}`;
+
+const payToEnv = process.env.PAYMENT_RECIPIENT_ADDRESS;
+if (!payToEnv) throw new Error("FATAL: PAYMENT_RECIPIENT_ADDRESS environment variable is missing");
+const payToAddress = payToEnv as `0x${string}`;
 
 const server = new x402ResourceServer(facilitator);
 server.register(activeBotChainCaip, new ExactEvmScheme());
@@ -327,12 +326,13 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
     }
   }
 
-  // 3) Fallback x402 Challenge
+  // 3) Fallback x402 Challenge — restore req.url so @x402/express matches full path "POST /api/chat"
   activity("payment.challenge", {
     path: fullPath,
     requiredAmount: requiredAmount.toString(),
     network: activeBotChainCaip,
   });
+  req.url = req.originalUrl;
   return x402Payment(req, res, next);
 });
 

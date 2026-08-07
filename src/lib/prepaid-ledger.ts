@@ -127,11 +127,11 @@ export interface SessionPayload {
 }
 
 function sessionSecret(): string {
-  return (
-    process.env.SESSION_SECRET ||
-    process.env.PAYMENT_OPERATOR_PRIVATE_KEY ||
-    "agentpay-dev-session-secret-change-me"
-  );
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) {
+    throw new Error("FATAL: SESSION_SECRET environment variable is missing");
+  }
+  return secret;
 }
 
 /** Default 30 days — user should not re-auth every day for a micropayment app. */
