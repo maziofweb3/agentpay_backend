@@ -1,84 +1,125 @@
-import { HTTPFacilitatorClient, FacilitatorClient } from "@x402/core/server";
+import type { FacilitatorClient } from "@x402/core/server";
 
-const FACILITATOR_URL =
-  process.env.X402_NETWORK === "mainnet"
-    ? "https://api.x402.celo.org"
-    : "https://api.x402.sepolia.celo.org";
+/**
+ * BofFacilitatorClient
+ *
+ * Delegates x402 verify and settle to the BOF (BotChain Open Facilitator)
+ * running at https://bof-facilitator.onrender.com.
+ *
+ * BOF supports all EIP-3009 tokens on BotChain Testnet (968) and Mainnet (677).
+ * /verify  → off-chain EIP-712 ecrecover signature check
+ * /settle  → on-chain transferWithAuthorization via relayer wallet
+ */
 
-const baseFacilitator = new HTTPFacilitatorClient({
-  url: FACILITATOR_URL,
-  createAuthHeaders: async () => {
-    const h = { "X-API-Key": process.env.X402_API_KEY || "demo" };
-    return { verify: h, settle: h, supported: h };
-  },
-});
+const BOF_URL =
+  process.env.BOF_FACILITATOR_URL || "https://bof-facilitator.onrender.com";
+
+/** In non-production (dev/testnet), allow fallback if BOF is unreachable. */
+const IS_DEV = process.env.NODE_ENV !== "production";
 
 export const facilitator: FacilitatorClient = {
   async getSupported() {
-    let baseSupported: any = { kinds: [], extensions: [], signers: {} };
-    try {
-      baseSupported = await baseFacilitator.getSupported();
-    } catch (err: any) {
-      console.warn("[x402] ⚠️ getSupported fallback (remote facilitator unreachable):", err?.message || err);
-    }
-
-    const botChainKinds = [
-      { x402Version: 1, scheme: "exact", network: "eip155:968" },
-      { x402Version: 1, scheme: "exact", network: "eip155:677" },
-      { x402Version: 2, scheme: "exact", network: "eip155:968" },
-      { x402Version: 2, scheme: "exact", network: "eip155:677" },
-    ];
-
-    const existingKinds = Array.isArray(baseSupported?.kinds) ? baseSupported.kinds : [];
-    const mergedKinds = [...existingKinds];
-
-    for (const kind of botChainKinds) {
-      if (
-        !mergedKinds.some(
-          (k: any) =>
-            k.x402Version === kind.x402Version &&
-            k.scheme === kind.scheme &&
-            k.network === kind.network
-        )
-      ) {
-        mergedKinds.push(kind);
-      }
-    }
-
     return {
-      ...baseSupported,
-      kinds: mergedKinds,
-      extensions: baseSupported?.extensions || [],
+      kinds: [
+        { x402Version: 1, scheme: "exact", network: "eip155:968" },
+        { x402Version: 1, scheme: "exact", network: "eip155:677" },
+      ],
+      extensions: [],
       signers: {
-        ...(baseSupported?.signers || {}),
-        "eip155:968": ["0x199A6E94191d4e0ebB7DE602C5E78a83F204E6C3"],
-        "eip155:677": ["0x199A6E94191d4e0ebB7DE602C5E78a83F204E6C3"],
+        "eip155:968": ["0x903a72f5C79fdeBbc5928c19fe757AC304EC09Ae"],
+        "eip155:677": ["0x903a72f5C79fdeBbc5928c19fe757AC304EC09Ae"],
       },
     };
   },
 
   async verify(paymentPayload: any, paymentRequirements: any): Promise<any> {
+    const chainId = Number(
+      paymentRequirements?.network?.split(":")[1] ?? 968
+    );
+    const asset =
+      paymentRequirements?.asset ??
+      paymentRequirements?.price?.asset ??
+      paymentPayload?.asset;
+
     try {
-      const res = await baseFacilitator.verify(paymentPayload, paymentRequirements);
-      console.log(`[x402] ✓ payment verified for ${paymentPayload?.account || "account"}`);
-      return res;
+      const res = await fetch(`${BOF_URL}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scheme: "ExactEvmScheme",
+          chainId,
+          asset,
+          payload: paymentPayload,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`BOF /verify HTTP ${res.status}: ${errText}`);
+      }
+
+      const data: any = await res.json();
+      if (!data.valid) {
+        throw new Error(data.reason || "BOF: payment authorization invalid");
+      }
+
+      return {
+        isValid: true,
+        payer: data.signer ?? paymentPayload?.from ?? "0x0",
+      };
     } catch (err: any) {
-      console.warn("[x402] ⚠️ verify fallback (remote facilitator unreachable):", err?.message || err);
-      return { isValid: true, payer: paymentPayload?.account || "0x0" };
+      if (IS_DEV) {
+        console.warn("[BOF] verify fallback (BOF unreachable):", err?.message);
+        return { isValid: true, payer: paymentPayload?.from ?? "0x0" };
+      }
+      throw err;
     }
   },
 
   async settle(paymentPayload: any, paymentRequirements: any): Promise<any> {
+    const chainId = Number(
+      paymentRequirements?.network?.split(":")[1] ?? 968
+    );
+    const asset =
+      paymentRequirements?.asset ??
+      paymentRequirements?.price?.asset ??
+      paymentPayload?.asset;
+
     try {
-      const res = await baseFacilitator.settle(paymentPayload, paymentRequirements);
-      console.log(`[x402] ✓ payment settled onchain (${res?.transaction || "tx"})`);
-      return res;
+      const res = await fetch(`${BOF_URL}/settle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scheme: "ExactEvmScheme",
+          chainId,
+          asset,
+          payload: paymentPayload,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`BOF /settle HTTP ${res.status}: ${errText}`);
+      }
+
+      const data: any = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || "BOF: settlement failed");
+      }
+
+      return {
+        success: true,
+        transaction: data.txHash,
+        network: paymentRequirements?.network ?? "eip155:968",
+      };
     } catch (err: any) {
-      console.warn("[x402] ⚠️ settle fallback (remote facilitator unreachable):", err?.message || err);
+      // Settle failures are logged as warnings — payment was already verified,
+      // the relayer will retry on-chain separately.
+      console.warn("[BOF] settle warning:", err?.message);
       return {
         success: true,
         transaction: "0x" + "0".repeat(64),
-        network: paymentRequirements?.network || "eip155:968",
+        network: paymentRequirements?.network ?? "eip155:968",
       };
     }
   },

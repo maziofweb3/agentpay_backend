@@ -34,8 +34,7 @@ app.use(
       "Authorization",
       "X-AgentPay-Payment-Tx",
       "PAYMENT-SIGNATURE",
-      "X-PAYMENT",
-      "X-PAYMENT-RESPONSE",
+      "X-Payment",
     ],
     exposedHeaders: [
       "Payment-Required",
@@ -58,17 +57,17 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   const start = Date.now();
   const method = req.method;
   const url = req.originalUrl || req.url;
-  
+
   res.on("finish", () => {
-    const durationMs = Date.now() - start;
-    activity("request.access", {
-      method,
-      path: url,
-      status: res.statusCode,
-      durationMs,
-      ip: (req.headers["x-forwarded-for"] as string)?.split(",")[0] || req.socket?.remoteAddress || null,
-      userAgent: req.headers["user-agent"] || null,
-    });
+    // Skip health probes and CORS preflight — they add noise with zero signal
+    if (!url.includes("/health") && method !== "OPTIONS") {
+      activity("request.access", {
+        method,
+        path: url,
+        status: res.statusCode,
+        ms: Date.now() - start,
+      });
+    }
   });
 
   next();
@@ -213,7 +212,63 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  // 1) One-shot on-chain USDT transfer proof
+  // ── Path 0: EIP-3009 x402 authorization (new single-click flow) ───────────
+  const xPayment = (req.headers["x-payment"] ?? req.headers["X-Payment"]) as string | undefined;
+  if (xPayment) {
+    try {
+      const payload = JSON.parse(Buffer.from(xPayment, "base64").toString("utf8"));
+
+      // ★ Amount validation — must cover the route price
+      const paymentValue = BigInt(payload.value ?? "0");
+      if (paymentValue < requiredAmount) {
+        activity(
+          "payment.x402_fail",
+          { path: fullPath, reason: `underpaid: got ${paymentValue}, need ${requiredAmount}` },
+          "warn"
+        );
+        return res.status(402).json({
+          error: `Insufficient payment: need ${requiredAmount.toString()} atomic units, got ${paymentValue.toString()}`,
+          requiredAmount: requiredAmount.toString(),
+          network: activeBotChainCaip,
+        });
+      }
+
+      // Verify EIP-3009 signature off-chain via BOF
+      await facilitator.verify(payload, { network: activeBotChainCaip, asset: apayAddress } as any);
+      activity("payment.x402_verified", {
+        path: fullPath,
+        from: String(payload.from).slice(0, 12),
+      });
+
+      // After handler flushes response, settle on-chain via BOF (non-blocking)
+      res.on("finish", () => {
+        if (res.statusCode >= 200 && res.statusCode < 400) {
+          (facilitator.settle(payload, { network: activeBotChainCaip, asset: apayAddress } as any) as Promise<any>)
+            .then((r: any) =>
+              activity("payment.x402_settled", {
+                path: fullPath,
+                tx: String(r.transaction).slice(0, 14),
+              })
+            )
+            .catch((e: Error) =>
+              activity("payment.settle_fail", { path: fullPath, reason: e.message }, "warn")
+            );
+        }
+      });
+
+      return next();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Payment verification failed";
+      activity("payment.x402_fail", { path: fullPath, reason: msg }, "warn");
+      return res.status(402).json({
+        error: msg,
+        paymentAsset: "APAY",
+        network: activeBotChainCaip,
+      });
+    }
+  }
+
+  // ── Path 1: Legacy on-chain USDT transfer proof ───────────────────────────
   const txHash = (req.headers[PAYMENT_TX_HEADER.toLowerCase()] || req.headers["x-agentpay-payment-tx"]) as string | undefined;
   if (txHash) {
     try {

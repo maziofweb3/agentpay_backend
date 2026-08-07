@@ -1,6 +1,8 @@
 /**
  * Structured activity logging for important gateway events.
- * Always writes a single JSON line so logs are greppable and machine-parseable.
+ *
+ * Format: [YYYY-MM-DD HH:MM:SS] LEVEL  event.name         key=val  key=val
+ * This is human-readable in Render's log viewer and greppable for automation.
  */
 
 export type ActivityLevel = "info" | "warn" | "error";
@@ -16,6 +18,10 @@ export type ActivityEvent =
   | "payment.prepaid_fail"
   | "payment.session_ok"
   | "payment.session_fail"
+  | "payment.x402_verified"
+  | "payment.x402_settled"
+  | "payment.settle_fail"
+  | "payment.x402_fail"
   | "credits.deposit_ok"
   | "credits.deposit_fail"
   | "credits.balance"
@@ -35,12 +41,14 @@ export function activity(
   fields: ActivityFields = {},
   level: ActivityLevel = "info"
 ): void {
-  const line = JSON.stringify({
-    ts: new Date().toISOString(),
-    level,
-    event,
-    ...fields,
-  });
+  const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const badge =
+    level === "error" ? "ERROR" : level === "warn" ? "WARN " : "INFO ";
+  const kv = Object.entries(fields)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("  ");
+  const line = `[${ts}] ${badge}  ${event.padEnd(28)} ${kv}`.trimEnd();
 
   if (level === "error") {
     console.error(line);
