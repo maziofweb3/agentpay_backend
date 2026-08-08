@@ -27,9 +27,11 @@ export function getActiveModel(): string {
   return model;
 }
 
-/** Resolved Gemini model id from environment (default: gemini-2.5-flash). */
+/** Resolved Gemini model id from environment. */
 export function getActiveGeminiModel(): string {
-  return process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL;
+  if (!model) throw new Error("FATAL: GEMINI_MODEL environment variable is missing");
+  return model;
 }
 
 function isPlaceholderKey(key: string): boolean {
