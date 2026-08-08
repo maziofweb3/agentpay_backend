@@ -9,7 +9,7 @@ import { paymentMiddleware } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { x402ResourceServer, RoutesConfig } from "@x402/core/server";
 import { facilitator } from "./lib/x402-facilitator.js";
-import { getActiveModel, generateChatResponse, enhanceImagePrompt, auditCodeSnippet } from "./lib/ai.js";
+import { getActiveModel, getActiveGeminiModel, generateChatResponse, enhanceImagePrompt, auditCodeSnippet, AIProvider } from "./lib/ai.js";
 import {
   amountForPaidRoute,
   PAYMENT_TX_HEADER,
@@ -175,8 +175,10 @@ const healthHandler = (_req: Request, res: Response) => {
     status: "ok",
     service: "AgentPay AI API Gateway (Express)",
     timestamp: new Date().toISOString(),
-    aiProvider: `Anthropic ${getActiveModel()}`,
-    model: getActiveModel(),
+    aiProvider: `Google ${getActiveGeminiModel()} (Default) / Anthropic ${getActiveModel()}`,
+    defaultModel: getActiveGeminiModel(),
+    geminiModel: getActiveGeminiModel(),
+    claudeModel: getActiveModel(),
     network: activeBotChainCaip,
     chainId: activeChainId,
     apayAsset: apayAddress,
@@ -345,9 +347,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, tool: "chat", error: validated.error });
   }
   const prompt = validated.value;
-  activity("ai.chat", { phase: "start", promptPreview: preview(prompt) });
+  const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
+  activity("ai.chat", { phase: "start", provider, promptPreview: preview(prompt) });
 
-  const result = await generateChatResponse(prompt);
+  const result = await generateChatResponse(prompt, provider);
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
     activity("ai.error", { tool: "chat", errorType: result.errorType, status, details: result.error }, "error");
@@ -391,9 +394,10 @@ app.post("/api/image", async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, tool: "image", error: validated.error });
   }
   const rawPrompt = validated.value;
-  activity("ai.image", { phase: "start", promptPreview: preview(rawPrompt) });
+  const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
+  activity("ai.image", { phase: "start", provider, promptPreview: preview(rawPrompt) });
 
-  const result = await enhanceImagePrompt(rawPrompt);
+  const result = await enhanceImagePrompt(rawPrompt, provider);
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
     activity("ai.error", { tool: "image", errorType: result.errorType, status, details: result.error }, "error");
@@ -429,10 +433,11 @@ app.post("/api/code", async (req: Request, res: Response) => {
     activity("request.reject", { tool: "code", reason: validated.error }, "warn");
     return res.status(400).json({ success: false, tool: "code", error: validated.error });
   }
-  const codeSnippet = validated.value;
-  activity("ai.code", { phase: "start", chars: codeSnippet.length });
+  const code = validated.value;
+  const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
+  activity("ai.code", { phase: "start", provider, codePreview: preview(code) });
 
-  const result = await auditCodeSnippet(codeSnippet);
+  const result = await auditCodeSnippet(code, provider);
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
     activity("ai.error", { tool: "code", errorType: result.errorType, status, details: result.error }, "error");

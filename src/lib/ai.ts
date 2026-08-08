@@ -1,9 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 
-const DEFAULT_MODEL = "claude-opus-5";
 const AGENT_ROUTER_BASE_URL = "https://agentrouter.org";
-
-/** Request timeout. The SDK default is 10 minutes, which would hold a paid HTTP request open far too long. */
 const REQUEST_TIMEOUT_MS = 45_000;
 const MAX_RETRIES = 1;
 
@@ -20,23 +18,24 @@ export type AIResult =
   | { ok: true; text: string; model: string; inputTokens: number; outputTokens: number; truncated: boolean }
   | { ok: false; errorType: AIErrorType; error: string };
 
-/** Resolved model id from environment. */
+export type AIProvider = "gemini" | "claude";
+
+/** Resolved Claude model id from environment. */
 export function getActiveModel(): string {
   const model = process.env.ANTHROPIC_MODEL;
   if (!model) throw new Error("FATAL: ANTHROPIC_MODEL environment variable is missing");
   return model;
 }
 
-function isPlaceholderKey(key: string): boolean {
-  return key.trim() === "" || key.includes("your_anthropic_claude_api_key_here");
+/** Resolved Gemini model id from environment (default: gemini-2.5-flash). */
+export function getActiveGeminiModel(): string {
+  return process.env.GEMINI_MODEL || "gemini-2.5-flash";
 }
 
-/**
- * Resolve the base URL for the configured key.
- *
- * An explicit ANTHROPIC_BASE_URL always wins. Otherwise `sk-ant-` keys are direct Anthropic
- * Console keys (SDK default), and anything else is assumed to be an AgentRouter gateway token.
- */
+function isPlaceholderKey(key: string): boolean {
+  return key.trim() === "" || key.includes("your_anthropic_claude_api_key_here") || key.includes("your_gemini_api_key_here");
+}
+
 function resolveBaseURL(apiKey: string): string | undefined {
   if (process.env.ANTHROPIC_BASE_URL) return process.env.ANTHROPIC_BASE_URL;
   return apiKey.startsWith("sk-ant-") ? undefined : AGENT_ROUTER_BASE_URL;
@@ -45,10 +44,6 @@ function resolveBaseURL(apiKey: string): string | undefined {
 let cachedClient: Anthropic | null = null;
 let cachedClientKey: string | null = null;
 
-/**
- * Lazily construct the client on first use so dotenv has already run, then memoize it so
- * connections are reused. The cache is keyed on the credentials it was built from.
- */
 function getAnthropicClient(): Anthropic | null {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey || isPlaceholderKey(apiKey)) {
@@ -62,7 +57,6 @@ function getAnthropicClient(): Anthropic | null {
   cachedClient = new Anthropic({
     apiKey,
     baseURL,
-    // AgentRouter gates on client identity; the header is sent when routing through a gateway.
     defaultHeaders: baseURL
       ? {
           "User-Agent": process.env.ANTHROPIC_USER_AGENT || "Cline/3.0.0",
@@ -76,7 +70,22 @@ function getAnthropicClient(): Anthropic | null {
   return cachedClient;
 }
 
-/** Classify a thrown error so configuration problems are distinguishable from transient ones. */
+let cachedGeminiClient: GoogleGenAI | null = null;
+let cachedGeminiKey: string | null = null;
+
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || isPlaceholderKey(apiKey)) {
+    throw new Error("FATAL: GEMINI_API_KEY environment variable is missing or placeholder");
+  }
+
+  if (cachedGeminiClient && cachedGeminiKey === apiKey) return cachedGeminiClient;
+
+  cachedGeminiClient = new GoogleGenAI({ apiKey });
+  cachedGeminiKey = apiKey;
+  return cachedGeminiClient;
+}
+
 export function classifyError(err: any): AIErrorType {
   const status = err?.status ?? err?.response?.status;
   const message = String(err?.message ?? err ?? "");
@@ -103,19 +112,9 @@ export interface NormalizedResponse {
   truncated: boolean;
 }
 
-/**
- * Normalize a completion into text + usage.
- *
- * Handles both real SDK objects and the raw JSON strings AgentRouter returns. Throws
- * AIGatewayError on gateway error bodies and on responses carrying no text, rather than
- * substituting placeholder prose that a caller would mistake for a real answer.
- *
- * Exported for unit testing.
- */
 export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResponse {
   let resObj: any = rawResponse;
 
-  // AgentRouter sometimes returns the payload as a JSON string (occasionally double-encoded).
   for (let i = 0; i < 2 && typeof resObj === "string"; i++) {
     if (resObj.trim().toLowerCase().startsWith("<!doctype") || resObj.toLowerCase().includes("aliyun_waf") || resObj.trim().toLowerCase().startsWith("<html")) {
       throw new AIGatewayError(
@@ -126,7 +125,6 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
     try {
       resObj = JSON.parse(resObj);
     } catch {
-      // Not JSON — a bare string body is the model's text.
       return { text: resObj as string, inputTokens: 0, outputTokens: 0, truncated: false };
     }
   }
@@ -138,7 +136,6 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
     );
   }
 
-  // A gateway error body parses cleanly and has no content — surface it instead of returning "".
   if (resObj.error) {
     const message =
       typeof resObj.error === "string" ? resObj.error : resObj.error?.message || JSON.stringify(resObj.error);
@@ -147,7 +144,6 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
 
   let text = "";
   if (Array.isArray(resObj.content)) {
-    // Join every text block; taking only the first truncates multi-block responses.
     text = resObj.content
       .filter((b: any) => b?.type === "text" && typeof b.text === "string")
       .map((b: any) => b.text)
@@ -174,8 +170,7 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
   };
 }
 
-/** Shared execution path: client lookup, call, normalize, log, classify failures. */
-async function runCompletion(
+async function runAnthropicCompletion(
   label: string,
   params: { maxTokens: number; system?: string; userContent: string }
 ): Promise<AIResult> {
@@ -201,44 +196,93 @@ async function runCompletion(
     const durationMs = Date.now() - start;
 
     console.log(
-      `[AI] ✓ ${label} completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
+      `[AI] ✓ ${label} (Claude) completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
     );
-    if (truncated) {
-      console.warn(`[AI] ⚠️  ${label} hit max_tokens (${params.maxTokens}) — output truncated`);
-    }
-
     return { ok: true, text, model, inputTokens, outputTokens, truncated };
   } catch (err: any) {
     const durationMs = Date.now() - start;
     const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
     const error = err?.message || String(err);
 
-    console.error(`[AI] ✗ ${label} failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
-    if (errorType === "auth") {
-      console.error(
-        `[AI]    → The gateway accepted the key but refused the model. Check token model permissions and quota.`
-      );
-    } else if (errorType === "invalid_model") {
-      console.error(`[AI]    → Model "${model}" was rejected. Set ANTHROPIC_MODEL to a model your token can access.`);
-    }
-
+    console.error(`[AI] ✗ ${label} (Claude) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
     return { ok: false, errorType, error };
   }
 }
 
-export async function generateChatResponse(prompt: string): Promise<AIResult> {
-  return runCompletion("chat", {
+async function runGeminiCompletion(
+  label: string,
+  params: { maxTokens: number; system?: string; userContent: string }
+): Promise<AIResult> {
+  const client = getGeminiClient();
+  const model = getActiveGeminiModel();
+
+  if (!client) {
+    const error = "GEMINI_API_KEY is not set — refusing to fabricate a response";
+    console.error(`[AI] ✗ ${label} unavailable: ${error}`);
+    return { ok: false, errorType: "no_key", error };
+  }
+
+  const start = Date.now();
+  try {
+    const response = await client.models.generateContent({
+      model,
+      contents: params.userContent,
+      config: {
+        ...(params.system ? { systemInstruction: params.system } : {}),
+        maxOutputTokens: params.maxTokens,
+      },
+    });
+
+    const text = response.text || "";
+    const durationMs = Date.now() - start;
+
+    if (!text.trim()) {
+      throw new AIGatewayError("Gemini API returned an empty response text", "empty_response");
+    }
+
+    const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+
+    console.log(
+      `[AI] ✓ ${label} (Gemini) completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
+    );
+    return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
+  } catch (err: any) {
+    const durationMs = Date.now() - start;
+    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+    const error = err?.message || String(err);
+
+    console.error(`[AI] ✗ ${label} (Gemini) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
+    return { ok: false, errorType, error };
+  }
+}
+
+export async function generateChatResponse(prompt: string, provider: AIProvider = "gemini"): Promise<AIResult> {
+  const params = {
     maxTokens: 1024,
     system: "You are AgentPay AI, a fast, helpful AI assistant built on BotChain. Provide concise, helpful answers.",
     userContent: prompt,
-  });
+  };
+
+  if (provider === "claude") {
+    return runAnthropicCompletion("chat", params);
+  }
+
+  // Default: Gemini 2.5 Flash
+  return runGeminiCompletion("chat", params);
 }
 
-export async function enhanceImagePrompt(prompt: string): Promise<AIResult> {
-  return runCompletion("image prompt enhancement", {
+export async function enhanceImagePrompt(prompt: string, provider: AIProvider = "gemini"): Promise<AIResult> {
+  const params = {
     maxTokens: 256,
     userContent: `Enhance this image prompt into a detailed visual description for image generation:\n<prompt>\n${prompt}\n</prompt>`,
-  });
+  };
+
+  if (provider === "claude") {
+    return runAnthropicCompletion("image prompt enhancement", params);
+  }
+
+  return runGeminiCompletion("image prompt enhancement", params);
 }
 
 export interface CodeAudit {
@@ -255,16 +299,15 @@ const AUDIT_INSTRUCTIONS = `Audit the smart contract code below for security vul
 Respond with ONLY a JSON object, no prose or markdown fences, in exactly this shape:
 {"score":"A-F letter grade","vulnerabilities":<integer count>,"summary":"one sentence","suggestions":["...","..."]}`;
 
-/**
- * Audit a snippet. The model's verdict is parsed from its JSON output — a score is never
- * invented locally, and a failed call yields an error rather than a passing grade.
- */
-export async function auditCodeSnippet(code: string): Promise<CodeAuditResult> {
-  const result = await runCompletion("code audit", {
+export async function auditCodeSnippet(code: string, provider: AIProvider = "gemini"): Promise<CodeAuditResult> {
+  const params = {
     maxTokens: 1024,
-    // Delimited so a snippet containing quotes cannot escape the surrounding framing.
     userContent: `${AUDIT_INSTRUCTIONS}\n\n<code>\n${code}\n</code>`,
-  });
+  };
+
+  const result = provider === "claude"
+    ? await runAnthropicCompletion("code audit", params)
+    : await runGeminiCompletion("code audit", params);
 
   if (!result.ok) return result;
 
@@ -281,9 +324,7 @@ export async function auditCodeSnippet(code: string): Promise<CodeAuditResult> {
   return { ok: true, audit, model: result.model };
 }
 
-/** Extract the audit verdict from the model's reply. Returns null when it cannot be trusted. */
 export function parseAuditJson(text: string): CodeAudit | null {
-  // Tolerate ```json fences and surrounding prose by locating the outermost object.
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end <= start) return null;
@@ -310,8 +351,9 @@ export function parseAuditJson(text: string): CodeAudit | null {
   };
 }
 
-/** Test seam: drop the memoized client so a test can change env between cases. */
 export function __resetClientCache(): void {
   cachedClient = null;
   cachedClientKey = null;
+  cachedGeminiClient = null;
+  cachedGeminiKey = null;
 }
