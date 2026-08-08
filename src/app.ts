@@ -34,6 +34,10 @@ import {
 import { handleCreditsDeposit } from "./lib/prepaid-ledger.js";
 import { formatReputationSummary } from "./lib/erc8004.js";
 import { appendAttributionTag } from "./lib/attribution.js";
+import {
+  getApayPriceUsd,
+  calculatePromptApayWei,
+} from "./lib/apay-price.js";
 
 const app = express();
 
@@ -68,7 +72,13 @@ function formatApay(amount: bigint | string): string {
   try {
     const val = typeof amount === "bigint" ? amount : BigInt(amount);
     const tokens = Number(val) / 1e18;
-    return `${tokens.toFixed(1)} $APAY`;
+    const formatted =
+      tokens % 1 === 0
+        ? tokens.toFixed(1)
+        : Number.isInteger(tokens * 100)
+        ? tokens.toFixed(2)
+        : tokens.toFixed(4);
+    return `${formatted} $APAY`;
   } catch {
     return `${amount} APAY`;
   }
@@ -137,72 +147,19 @@ for (const network of extraNetworks) {
   server.register(network as `${string}:${string}`, new ExactEvmScheme());
 }
 
-const routePrices: Record<string, string> = {
-  "POST /api/chat": "1000000000000000000", // 1.0 APAY
-  "POST /api/image": "5000000000000000000", // 5.0 APAY
-  "POST /api/code": "2000000000000000000", // 2.0 APAY
-  "POST /api/botchain/relay": "1000000000000000000", // 1.0 APAY
-};
-
-const routes: RoutesConfig = {
-  "POST /api/chat": {
-    accepts: {
-      scheme: "exact",
-      network: activeBotChainCaip,
-      payTo: payToAddress,
-      price: {
-        amount: routePrices["POST /api/chat"],
-        asset: apayAddress,
-        extra: { name: "AgentPay Token", version: "1" },
-      },
-    },
-    description: "Claude AI Chat Prompt (1.0 $APAY)",
-  },
-  "POST /api/image": {
-    accepts: {
-      scheme: "exact",
-      network: activeBotChainCaip,
-      payTo: payToAddress,
-      price: {
-        amount: routePrices["POST /api/image"],
-        asset: apayAddress,
-        extra: { name: "AgentPay Token", version: "1" },
-      },
-    },
-    description: "AI Image Generation (5.0 $APAY)",
-  },
-  "POST /api/code": {
-    accepts: {
-      scheme: "exact",
-      network: activeBotChainCaip,
-      payTo: payToAddress,
-      price: {
-        amount: routePrices["POST /api/code"],
-        asset: apayAddress,
-        extra: { name: "AgentPay Token", version: "1" },
-      },
-    },
-    description: "AI Code Security & Audit (2.0 $APAY)",
-  },
-  "POST /api/botchain/relay": {
-    accepts: {
-      scheme: "exact",
-      network: activeBotChainCaip,
-      payTo: payToAddress,
-      price: {
-        amount: routePrices["POST /api/botchain/relay"],
-        asset: apayAddress,
-        extra: { name: "AgentPay Token", version: "1" },
-      },
-    },
-    description: "BotChain Autonomous Agent Programmatic Relay (1.0 $APAY)",
-  },
-};
-
-const x402Payment = paymentMiddleware(routes, server);
+// GET /api/price — returns current APAY token price status, single source of truth matrix, and cache info
+app.get("/api/price", async (_req: Request, res: Response) => {
+  const priceInfo = await getApayPriceUsd();
+  return res.json({
+    status: "ok",
+    token: "APAY",
+    ...priceInfo,
+  });
+});
 
 // Health check endpoints
-const healthHandler = (_req: Request, res: Response) => {
+const healthHandler = async (_req: Request, res: Response) => {
+  const priceInfo = await getApayPriceUsd();
   return res.json({
     status: "ok",
     service: "AgentPay AI API Gateway (Express)",
@@ -216,6 +173,10 @@ const healthHandler = (_req: Request, res: Response) => {
     apayAsset: apayAddress,
     paymentAsset: "APAY",
     paymentAssetOnly: true,
+    apayPriceUsd: priceInfo.priceUsd,
+    apayPriceSource: priceInfo.source,
+    baseComputeUnitUsd: priceInfo.baseComputeUnitUsd,
+    servicePrices: priceInfo.servicePrices,
     paymentMethods: ["prepaid-session", "x402-exact-eip3009"],
     paymentTxHeader: "X-AgentPay-Payment-Tx",
     sessionHeader: "Authorization: Bearer <sessionToken>",
@@ -234,18 +195,54 @@ const healthHandler = (_req: Request, res: Response) => {
 app.get("/health", healthHandler);
 app.get("/api/health", healthHandler);
 
-// Payment Gate Middleware
+// Payment Gate Middleware with Single Source of Truth Dynamic Billing
 app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
   const method = req.method.toUpperCase();
   const pathname = req.baseUrl
     ? req.baseUrl.replace(/\/+$/, "") + req.path
     : req.path;
   const fullPath = pathname.startsWith("/api") ? pathname : `/api${pathname}`;
-  const requiredAmount = amountForPaidRoute(method, fullPath, routePrices);
 
-  if (requiredAmount === null) {
+  if (method !== "POST") {
     return next();
   }
+
+  const priceInfo = await getApayPriceUsd();
+  const promptText = (req.body?.prompt ?? req.body?.code ?? req.body?.message ?? "").toString();
+  const provider = (req.body?.provider ?? (req.headers["x-provider"] as string) ?? "").toString();
+
+  const billing = calculatePromptApayWei({
+    fullPath,
+    promptText,
+    provider,
+    apayPriceUsd: priceInfo.priceUsd,
+  });
+
+  if (billing === null) {
+    return next();
+  }
+
+  const {
+    targetUsdCost,
+    requiredAmount,
+    requiredAmountFormatted,
+    modelKey,
+    modelName,
+    inputTokens,
+    outputTokenBudget,
+    rawComputeUsd,
+    profitUsd,
+  } = {
+    targetUsdCost: billing.totalUsd,
+    requiredAmount: billing.requiredAmount,
+    requiredAmountFormatted: billing.requiredAmountFormatted,
+    modelKey: billing.modelKey,
+    modelName: billing.modelName,
+    inputTokens: billing.inputTokens,
+    outputTokenBudget: billing.outputTokenBudget,
+    rawComputeUsd: billing.rawComputeUsd,
+    profitUsd: billing.profitUsd,
+  };
 
   // ── Path 0: EIP-3009 x402 authorization (new single-click flow) ───────────
   const xPayment = (req.headers["x-payment"] ?? req.headers["X-Payment"]) as
@@ -411,14 +408,59 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
     }
   }
 
-  // 3) Fallback x402 Challenge — restore req.url so @x402/express matches full path "POST /api/chat"
+  // 3) Fallback x402 Challenge — clean 402 response with dynamic pre-challenge token billing
   activity("payment.challenge", {
     path: fullPath,
+    modelKey,
+    modelName,
+    inputTokens,
+    outputTokenBudget,
+    rawComputeUsd,
+    profitUsd,
+    computeCostUsd: targetUsdCost,
+    apayPriceUsd: priceInfo.priceUsd,
     requiredAmount: requiredAmount.toString(),
+    requiredAmountFormatted,
     network: activeBotChainCaip,
   });
-  req.url = req.originalUrl;
-  return x402Payment(req, res, next);
+
+  const paymentAccept = {
+    accepts: [
+      {
+        scheme: "exact",
+        network: activeBotChainCaip,
+        amount: requiredAmount.toString(),
+        asset: apayAddress,
+        payTo: payToAddress,
+        extra: { name: "AgentPay Token", version: "1" },
+      },
+    ],
+  };
+
+  const headerBase64 = Buffer.from(JSON.stringify(paymentAccept)).toString(
+    "base64"
+  );
+  res.setHeader("payment-required", headerBase64);
+  res.setHeader("Payment-Required", headerBase64);
+
+  return res.status(402).json({
+    error: `Payment required: ${requiredAmountFormatted}`,
+    accepts: paymentAccept.accepts,
+    paymentAsset: "APAY",
+    requiredAmount: requiredAmount.toString(),
+    requiredAmountFormatted,
+    modelKey,
+    modelName,
+    inputTokens,
+    outputTokenBudget,
+    rawComputeUsd,
+    profitUsd,
+    totalUsd: targetUsdCost,
+    computeCostUsd: targetUsdCost,
+    apayPriceUsd: priceInfo.priceUsd,
+    network: activeBotChainCaip,
+    payTo: payToAddress,
+  });
 });
 
 // Route Endpoints
