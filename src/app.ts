@@ -9,7 +9,14 @@ import { paymentMiddleware } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { x402ResourceServer, RoutesConfig } from "@x402/core/server";
 import { facilitator } from "./lib/x402-facilitator.js";
-import { getActiveModel, getActiveGeminiModel, generateChatResponse, enhanceImagePrompt, auditCodeSnippet, AIProvider } from "./lib/ai.js";
+import {
+  getActiveModel,
+  getActiveGeminiModel,
+  generateChatResponse,
+  enhanceImagePrompt,
+  auditCodeSnippet,
+  AIProvider,
+} from "./lib/ai.js";
 import {
   amountForPaidRoute,
   PAYMENT_TX_HEADER,
@@ -18,7 +25,12 @@ import {
 } from "./lib/usdt-transfer-payment.js";
 import { trySessionPayment } from "./lib/session-payment.js";
 import { activity } from "./lib/activity-log.js";
-import { validateTextField, preview, aiErrorStatus, aiErrorHint } from "./lib/validation.js";
+import {
+  validateTextField,
+  preview,
+  aiErrorStatus,
+  aiErrorHint,
+} from "./lib/validation.js";
 import { handleCreditsDeposit } from "./lib/prepaid-ledger.js";
 import { formatReputationSummary } from "./lib/erc8004.js";
 import { appendAttributionTag } from "./lib/attribution.js";
@@ -47,10 +59,20 @@ app.use(
       "X-AgentPay-Payment-Tx",
     ],
     maxAge: 86400,
-  })
+  }),
 );
 
 app.use(express.json());
+
+function formatApay(amount: bigint | string): string {
+  try {
+    const val = typeof amount === "bigint" ? amount : BigInt(amount);
+    const tokens = Number(val) / 1e18;
+    return `${tokens.toFixed(1)} $APAY`;
+  } catch {
+    return `${amount} APAY`;
+  }
+}
 
 // Request Access Logging Middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -74,24 +96,34 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 const rawNetworkEnv = process.env.X402_NETWORK ?? "testnet";
-const rawNetwork = rawNetworkEnv === "mainnet" || rawNetworkEnv === "testnet" ? rawNetworkEnv : "testnet";
+const rawNetwork =
+  rawNetworkEnv === "mainnet" || rawNetworkEnv === "testnet"
+    ? rawNetworkEnv
+    : "testnet";
 const isMainnet = rawNetwork === "mainnet";
 
 const botChainTestnetCaip = "eip155:968" as const;
 const botChainMainnetCaip = "eip155:677" as const;
-const activeBotChainCaip = isMainnet ? botChainMainnetCaip : botChainTestnetCaip;
+const activeBotChainCaip = isMainnet
+  ? botChainMainnetCaip
+  : botChainTestnetCaip;
 const activeChainId = isMainnet ? 677 : 968;
 
 const rpcUrlEnv = process.env.BOTCHAIN_RPC_URL;
-if (!rpcUrlEnv) throw new Error("FATAL: BOTCHAIN_RPC_URL environment variable is missing");
+if (!rpcUrlEnv)
+  throw new Error("FATAL: BOTCHAIN_RPC_URL environment variable is missing");
 const activeRpcUrl = rpcUrlEnv;
 
 const apayEnv = process.env.APAY_TOKEN_ADDRESS;
-if (!apayEnv) throw new Error("FATAL: APAY_TOKEN_ADDRESS environment variable is missing");
+if (!apayEnv)
+  throw new Error("FATAL: APAY_TOKEN_ADDRESS environment variable is missing");
 const apayAddress = apayEnv as `0x${string}`;
 
 const payToEnv = process.env.PAYMENT_RECIPIENT_ADDRESS;
-if (!payToEnv) throw new Error("FATAL: PAYMENT_RECIPIENT_ADDRESS environment variable is missing");
+if (!payToEnv)
+  throw new Error(
+    "FATAL: PAYMENT_RECIPIENT_ADDRESS environment variable is missing",
+  );
 const payToAddress = payToEnv as `0x${string}`;
 
 const server = new x402ResourceServer(facilitator);
@@ -205,7 +237,9 @@ app.get("/api/health", healthHandler);
 // Payment Gate Middleware
 app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
   const method = req.method.toUpperCase();
-  const pathname = req.baseUrl ? req.baseUrl.replace(/\/+$/, "") + req.path : req.path;
+  const pathname = req.baseUrl
+    ? req.baseUrl.replace(/\/+$/, "") + req.path
+    : req.path;
   const fullPath = pathname.startsWith("/api") ? pathname : `/api${pathname}`;
   const requiredAmount = amountForPaidRoute(method, fullPath, routePrices);
 
@@ -214,52 +248,77 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
   }
 
   // ── Path 0: EIP-3009 x402 authorization (new single-click flow) ───────────
-  const xPayment = (req.headers["x-payment"] ?? req.headers["X-Payment"]) as string | undefined;
+  const xPayment = (req.headers["x-payment"] ?? req.headers["X-Payment"]) as
+    | string
+    | undefined;
   if (xPayment) {
     try {
-      const payload = JSON.parse(Buffer.from(xPayment, "base64").toString("utf8"));
+      const payload = JSON.parse(
+        Buffer.from(xPayment, "base64").toString("utf8"),
+      );
 
       // ★ Amount validation — must cover the route price
       const paymentValue = BigInt(payload.value ?? "0");
       if (paymentValue < requiredAmount) {
+        const needFormatted = formatApay(requiredAmount);
+        const gotFormatted = formatApay(paymentValue);
         activity(
           "payment.x402_fail",
-          { path: fullPath, reason: `underpaid: got ${paymentValue}, need ${requiredAmount}` },
+          {
+            path: fullPath,
+            reason: `underpaid: got ${gotFormatted}, need ${needFormatted}`,
+          },
           "warn"
         );
         return res.status(402).json({
-          error: `Insufficient payment: need ${requiredAmount.toString()} atomic units, got ${paymentValue.toString()}`,
+          error: `Insufficient payment: need ${needFormatted}, got ${gotFormatted}`,
           requiredAmount: requiredAmount.toString(),
+          requiredAmountFormatted: needFormatted,
           network: activeBotChainCaip,
         });
       }
 
       // Verify EIP-3009 signature off-chain via BOF
-      await facilitator.verify(payload, { network: activeBotChainCaip, asset: apayAddress } as any);
+      await facilitator.verify(payload, {
+        network: activeBotChainCaip,
+        asset: apayAddress,
+      } as any);
       activity("payment.x402_verified", {
         path: fullPath,
+        amount: formatApay(paymentValue),
         from: String(payload.from).slice(0, 12),
       });
 
       // After handler flushes response, settle on-chain via BOF (non-blocking)
       res.on("finish", () => {
         if (res.statusCode >= 200 && res.statusCode < 400) {
-          (facilitator.settle(payload, { network: activeBotChainCaip, asset: apayAddress } as any) as Promise<any>)
+          (
+            facilitator.settle(payload, {
+              network: activeBotChainCaip,
+              asset: apayAddress,
+            } as any) as Promise<any>
+          )
             .then((r: any) =>
               activity("payment.x402_settled", {
                 path: fullPath,
+                amount: formatApay(paymentValue),
                 tx: String(r.transaction).slice(0, 14),
               })
             )
             .catch((e: Error) =>
-              activity("payment.settle_fail", { path: fullPath, reason: e.message }, "warn")
+              activity(
+                "payment.settle_fail",
+                { path: fullPath, amount: formatApay(paymentValue), reason: e.message },
+                "warn"
+              )
             );
         }
       });
 
       return next();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Payment verification failed";
+      const msg =
+        err instanceof Error ? err.message : "Payment verification failed";
       activity("payment.x402_fail", { path: fullPath, reason: msg }, "warn");
       return res.status(402).json({
         error: msg,
@@ -270,7 +329,8 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
   }
 
   // ── Path 1: Legacy on-chain USDT transfer proof ───────────────────────────
-  const txHash = (req.headers[PAYMENT_TX_HEADER.toLowerCase()] || req.headers["x-agentpay-payment-tx"]) as string | undefined;
+  const txHash = (req.headers[PAYMENT_TX_HEADER.toLowerCase()] ||
+    req.headers["x-agentpay-payment-tx"]) as string | undefined;
   if (txHash) {
     try {
       const result = await verifyUsdtTransferPayment({
@@ -292,16 +352,34 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
       res.on("finish", () => {
         if (res.statusCode >= 200 && res.statusCode < 400) {
           consumePaymentTx(result.txHash);
-          activity("payment.consumed", { path: fullPath, txHash: result.txHash, status: res.statusCode });
+          activity("payment.consumed", {
+            path: fullPath,
+            txHash: result.txHash,
+            status: res.statusCode,
+          });
         } else {
-          activity("payment.transfer_ok", { path: fullPath, txHash: result.txHash, note: "handler_failed_tx_not_consumed", status: res.statusCode }, "warn");
+          activity(
+            "payment.transfer_ok",
+            {
+              path: fullPath,
+              txHash: result.txHash,
+              note: "handler_failed_tx_not_consumed",
+              status: res.statusCode,
+            },
+            "warn",
+          );
         }
       });
 
       return next();
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Invalid USDT payment transaction";
-      activity("payment.transfer_fail", { path: fullPath, reason: message }, "warn");
+      const message =
+        err instanceof Error ? err.message : "Invalid USDT payment transaction";
+      activity(
+        "payment.transfer_fail",
+        { path: fullPath, reason: message },
+        "warn",
+      );
       return res.status(402).json({
         error: message,
         paymentAsset: "USDT",
@@ -323,8 +401,13 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
         return next();
       }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Session payment failed";
-      activity("payment.session_fail", { path: fullPath, reason: message }, "warn");
+      const message =
+        err instanceof Error ? err.message : "Session payment failed";
+      activity(
+        "payment.session_fail",
+        { path: fullPath, reason: message },
+        "warn",
+      );
     }
   }
 
@@ -343,17 +426,36 @@ app.post("/api/chat", async (req: Request, res: Response) => {
   const body = req.body || {};
   const validated = validateTextField(body.prompt, "prompt");
   if (!validated.ok) {
-    activity("request.reject", { tool: "chat", reason: validated.error }, "warn");
-    return res.status(400).json({ success: false, tool: "chat", error: validated.error });
+    activity(
+      "request.reject",
+      { tool: "chat", reason: validated.error },
+      "warn",
+    );
+    return res
+      .status(400)
+      .json({ success: false, tool: "chat", error: validated.error });
   }
   const prompt = validated.value;
   const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
-  activity("ai.chat", { phase: "start", provider, promptPreview: preview(prompt) });
+  activity("ai.chat", {
+    phase: "start",
+    provider,
+    promptPreview: preview(prompt),
+  });
 
   const result = await generateChatResponse(prompt, provider);
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
-    activity("ai.error", { tool: "chat", errorType: result.errorType, status, details: result.error }, "error");
+    activity(
+      "ai.error",
+      {
+        tool: "chat",
+        errorType: result.errorType,
+        status,
+        details: result.error,
+      },
+      "error",
+    );
     return res.status(status).json({
       success: false,
       tool: "chat",
@@ -381,7 +483,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     response: result.text,
     model: result.model,
     truncated: result.truncated,
-    usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+    usage: {
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    },
     timestamp: new Date().toISOString(),
   });
 });
@@ -390,17 +495,36 @@ app.post("/api/image", async (req: Request, res: Response) => {
   const body = req.body || {};
   const validated = validateTextField(body.prompt, "prompt");
   if (!validated.ok) {
-    activity("request.reject", { tool: "image", reason: validated.error }, "warn");
-    return res.status(400).json({ success: false, tool: "image", error: validated.error });
+    activity(
+      "request.reject",
+      { tool: "image", reason: validated.error },
+      "warn",
+    );
+    return res
+      .status(400)
+      .json({ success: false, tool: "image", error: validated.error });
   }
   const rawPrompt = validated.value;
   const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
-  activity("ai.image", { phase: "start", provider, promptPreview: preview(rawPrompt) });
+  activity("ai.image", {
+    phase: "start",
+    provider,
+    promptPreview: preview(rawPrompt),
+  });
 
   const result = await enhanceImagePrompt(rawPrompt, provider);
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
-    activity("ai.error", { tool: "image", errorType: result.errorType, status, details: result.error }, "error");
+    activity(
+      "ai.error",
+      {
+        tool: "image",
+        errorType: result.errorType,
+        status,
+        details: result.error,
+      },
+      "error",
+    );
     return res.status(status).json({
       success: false,
       tool: "image",
@@ -421,7 +545,10 @@ app.post("/api/image", async (req: Request, res: Response) => {
     imageUrl: `https://placehold.co/512x512/0f172a/f59e0b?text=${encodeURIComponent(rawPrompt)}`,
     model: result.model,
     truncated: result.truncated,
-    usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+    usage: {
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    },
     timestamp: new Date().toISOString(),
   });
 });
@@ -430,8 +557,14 @@ app.post("/api/code", async (req: Request, res: Response) => {
   const body = req.body || {};
   const validated = validateTextField(body.code, "code");
   if (!validated.ok) {
-    activity("request.reject", { tool: "code", reason: validated.error }, "warn");
-    return res.status(400).json({ success: false, tool: "code", error: validated.error });
+    activity(
+      "request.reject",
+      { tool: "code", reason: validated.error },
+      "warn",
+    );
+    return res
+      .status(400)
+      .json({ success: false, tool: "code", error: validated.error });
   }
   const code = validated.value;
   const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
@@ -440,7 +573,16 @@ app.post("/api/code", async (req: Request, res: Response) => {
   const result = await auditCodeSnippet(code, provider);
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
-    activity("ai.error", { tool: "code", errorType: result.errorType, status, details: result.error }, "error");
+    activity(
+      "ai.error",
+      {
+        tool: "code",
+        errorType: result.errorType,
+        status,
+        details: result.error,
+      },
+      "error",
+    );
     return res.status(status).json({
       success: false,
       tool: "code",
@@ -452,7 +594,11 @@ app.post("/api/code", async (req: Request, res: Response) => {
     });
   }
 
-  activity("ai.code", { phase: "ok", score: result.audit.score, vulnerabilities: result.audit.vulnerabilities });
+  activity("ai.code", {
+    phase: "ok",
+    score: result.audit.score,
+    vulnerabilities: result.audit.vulnerabilities,
+  });
   return res.json({
     success: true,
     tool: "code",
@@ -464,7 +610,8 @@ app.post("/api/code", async (req: Request, res: Response) => {
 
 app.post("/api/reputation", async (req: Request, res: Response) => {
   const body = req.body || {};
-  const agentAddress = typeof body.agentAddress === "string" ? body.agentAddress : undefined;
+  const agentAddress =
+    typeof body.agentAddress === "string" ? body.agentAddress : undefined;
   const formatted = formatReputationSummary(85, 12);
   return res.json({
     success: true,
