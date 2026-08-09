@@ -9,6 +9,7 @@ export type AIErrorType =
   | "no_key"
   | "auth"
   | "invalid_model"
+  | "rate_limit"
   | "timeout"
   | "network"
   | "empty_response"
@@ -89,8 +90,17 @@ function getGeminiClient(): GoogleGenAI | null {
 }
 
 export function classifyError(err: any): AIErrorType {
-  const status = err?.status ?? err?.response?.status;
-  const message = String(err?.message ?? err ?? "");
+  const status = err?.status ?? err?.response?.status ?? err?.error?.code ?? err?.code;
+  const message = String(err?.message ?? err?.error?.message ?? err ?? "");
+  const statusStr = String(err?.error?.status ?? err?.status ?? "");
+
+  if (
+    status === 429 ||
+    statusStr === "RESOURCE_EXHAUSTED" ||
+    /quota|RESOURCE_EXHAUSTED|rate_limit|rate limit|too many requests|429/i.test(message)
+  ) {
+    return "rate_limit";
+  }
 
   if (status === 401 || status === 403) return "auth";
   if (status === 404 || (/model/i.test(message) && /not found|unknown|无权访问/i.test(message))) return "invalid_model";

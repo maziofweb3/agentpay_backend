@@ -36,8 +36,10 @@ export function preview(text: string, max = 80): string {
  * HTTP status for an AI failure. Configuration problems are the operator's fault (503,
  * the service is misconfigured and no retry will help); upstream failures are 502.
  */
-export function aiErrorStatus(errorType: AIErrorType): 502 | 503 | 504 {
+export function aiErrorStatus(errorType: AIErrorType): 429 | 502 | 503 | 504 {
   switch (errorType) {
+    case "rate_limit":
+      return 429;
     case "no_key":
     case "auth":
     case "invalid_model":
@@ -52,12 +54,14 @@ export function aiErrorStatus(errorType: AIErrorType): 502 | 503 | 504 {
 /** Operator-facing hint attached to error responses so failures are self-explaining. */
 export function aiErrorHint(errorType: AIErrorType): string {
   switch (errorType) {
+    case "rate_limit":
+      return "The AI provider API rate limit or free-tier quota has been exceeded (429 RESOURCE_EXHAUSTED). Please retry in a few seconds or attach a billing account to your AI Studio API key.";
     case "no_key":
-      return "ANTHROPIC_API_KEY is not configured on the server.";
+      return "API key is not configured on the server.";
     case "auth":
       return "The AI gateway rejected the credentials or denied access to the configured model.";
     case "invalid_model":
-      return "The configured ANTHROPIC_MODEL is not available to this token.";
+      return "The configured AI model is not available to this token.";
     case "timeout":
       return "The AI gateway did not respond in time.";
     case "network":
