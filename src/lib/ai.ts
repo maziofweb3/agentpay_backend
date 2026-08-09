@@ -259,6 +259,60 @@ async function runGeminiCompletion(
   }
 }
 
+/**
+ * Like runGeminiCompletion, but passes responseMimeType: "application/json".
+ * This forces Gemini to emit a raw JSON object — no markdown fences, no prose preamble.
+ * Use this for any call that must produce structured JSON output.
+ */
+async function runGeminiJsonCompletion(
+  label: string,
+  params: { maxTokens: number; system?: string; userContent: string }
+): Promise<AIResult> {
+  const client = getGeminiClient();
+  const model = getActiveGeminiModel();
+
+  if (!client) {
+    const error = "GEMINI_API_KEY is not set — refusing to fabricate a response";
+    console.error(`[AI] ✗ ${label} unavailable: ${error}`);
+    return { ok: false, errorType: "no_key", error };
+  }
+
+  const start = Date.now();
+  try {
+    const response = await client.models.generateContent({
+      model,
+      contents: params.userContent,
+      config: {
+        ...(params.system ? { systemInstruction: params.system } : {}),
+        maxOutputTokens: params.maxTokens,
+        responseMimeType: "application/json",
+      },
+    });
+
+    const text = response.text || "";
+    const durationMs = Date.now() - start;
+
+    if (!text.trim()) {
+      throw new AIGatewayError("Gemini JSON API returned an empty response text", "empty_response");
+    }
+
+    const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+
+    console.log(
+      `[AI] ✓ ${label} (Gemini/JSON) completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
+    );
+    return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
+  } catch (err: any) {
+    const durationMs = Date.now() - start;
+    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+    const error = err?.message || String(err);
+
+    console.error(`[AI] ✗ ${label} (Gemini/JSON) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
+    return { ok: false, errorType, error };
+  }
+}
+
 export async function generateChatResponse(prompt: string, provider: AIProvider = "gemini"): Promise<AIResult> {
   const params = {
     maxTokens: 1024,
@@ -274,10 +328,59 @@ export async function generateChatResponse(prompt: string, provider: AIProvider 
   return runGeminiCompletion("chat", params);
 }
 
-export async function enhanceImagePrompt(prompt: string, provider: AIProvider = "gemini"): Promise<AIResult> {
+export async function enhanceImagePrompt(
+  prompt: string,
+  provider: AIProvider = "gemini",
+  imageBase64?: string
+): Promise<AIResult> {
+  // If an image is provided, use multimodal vision analysis
+  if (imageBase64) {
+    const client = getGeminiClient();
+    const model = getActiveGeminiModel();
+    if (!client) {
+      return { ok: false, errorType: "no_key", error: "GEMINI_API_KEY is not set" };
+    }
+    const start = Date.now();
+    try {
+      // Extract base64 data and mime type from data URL
+      const matches = imageBase64.match(/^data:([^;]+);base64,(.+)$/);
+      const mimeType = matches ? matches[1] : "image/jpeg";
+      const base64Data = matches ? matches[2] : imageBase64;
+
+      const response = await client.models.generateContent({
+        model,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: prompt ? `Analyze this image and respond to: ${prompt}` : "Describe this image in detail, including style, colors, composition, and notable elements." },
+              { inlineData: { mimeType, data: base64Data } },
+            ],
+          },
+        ],
+        config: { maxOutputTokens: 512 },
+      });
+      const text = response.text || "";
+      if (!text.trim()) {
+        throw new AIGatewayError("Gemini vision returned an empty response", "empty_response");
+      }
+      const durationMs = Date.now() - start;
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+      console.log(`[AI] ✓ image vision (Gemini) completed in ${durationMs}ms`);
+      return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
+    } catch (err: any) {
+      const durationMs = Date.now() - start;
+      const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+      const error = err?.message || String(err);
+      console.error(`[AI] ✗ image vision (Gemini) failed in ${durationMs}ms [${errorType}]: ${error}`);
+      return { ok: false, errorType, error };
+    }
+  }
+
   const params = {
     maxTokens: 256,
-    userContent: `Enhance this image prompt into a detailed visual description for image generation:\n<prompt>\n${prompt}\n</prompt>`,
+    userContent: `Enhance this image prompt into a detailed, vivid visual description for AI image generation:\n<prompt>\n${prompt}\n</prompt>\nReturn only the enhanced description, no preamble.`,
   };
 
   if (provider === "claude") {
@@ -285,6 +388,40 @@ export async function enhanceImagePrompt(prompt: string, provider: AIProvider = 
   }
 
   return runGeminiCompletion("image prompt enhancement", params);
+}
+
+/** Generate an image using Google Imagen 3 and return a base64 data URI. */
+export async function generateImageVisual(
+  enhancedPrompt: string
+): Promise<{ ok: true; imageDataUri: string } | { ok: false; errorType: AIErrorType; error: string }> {
+  const client = getGeminiClient();
+  if (!client) {
+    return { ok: false, errorType: "no_key", error: "GEMINI_API_KEY is not set" };
+  }
+  const start = Date.now();
+  try {
+    const response = await client.models.generateImages({
+      model: "imagen-3.0-generate-002",
+      prompt: enhancedPrompt,
+      config: { numberOfImages: 1, outputMimeType: "image/png" },
+    });
+
+    const image = response.generatedImages?.[0];
+    if (!image?.image?.imageBytes) {
+      throw new AIGatewayError("Imagen 3 returned no image bytes", "empty_response");
+    }
+
+    const durationMs = Date.now() - start;
+    console.log(`[AI] ✓ image generation (Imagen 3) completed in ${durationMs}ms`);
+    const imageDataUri = `data:image/png;base64,${image.image.imageBytes}`;
+    return { ok: true, imageDataUri };
+  } catch (err: any) {
+    const durationMs = Date.now() - start;
+    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+    const error = err?.message || String(err);
+    console.error(`[AI] ✗ image generation (Imagen 3) failed in ${durationMs}ms [${errorType}]: ${error}`);
+    return { ok: false, errorType, error };
+  }
 }
 
 export interface CodeAudit {
@@ -307,15 +444,20 @@ export async function auditCodeSnippet(code: string, provider: AIProvider = "gem
     userContent: `${AUDIT_INSTRUCTIONS}\n\n<code>\n${code}\n</code>`,
   };
 
+  // For Gemini: use JSON-mode (responseMimeType: "application/json") to guarantee
+  // raw JSON output with no markdown fences or prose wrapping.
+  // For Claude: use standard text completion with parseAuditJson sanitizer.
   const result = provider === "claude"
     ? await runAnthropicCompletion("code audit", params)
-    : await runGeminiCompletion("code audit", params);
+    : await runGeminiJsonCompletion("code audit", params);
 
   if (!result.ok) return result;
 
   const audit = parseAuditJson(result.text);
   if (!audit) {
-    console.error(`[AI] ✗ code audit returned unparseable output; refusing to synthesize a score`);
+    console.error(
+      `[AI] ✗ code audit returned unparseable output (raw first 400 chars): ${result.text.slice(0, 400)}`
+    );
     return {
       ok: false,
       errorType: "empty_response",
@@ -327,15 +469,33 @@ export async function auditCodeSnippet(code: string, provider: AIProvider = "gem
 }
 
 export function parseAuditJson(text: string): CodeAudit | null {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
+  // Step 1: Strip Markdown code fences (```json ... ``` or ``` ... ```)
+  let sanitized = text.replace(/```(?:json)?\s*/gi, "").replace(/```/g, "").trim();
+
+  // Step 2: Extract the first JSON object
+  const start = sanitized.indexOf("{");
+  const end = sanitized.lastIndexOf("}");
   if (start === -1 || end <= start) return null;
+  sanitized = sanitized.slice(start, end + 1);
+
+  // Step 3: Remove trailing commas before } or ] (common AI output mistake)
+  sanitized = sanitized.replace(/,\s*([}\]])/g, "$1");
 
   let parsed: any;
   try {
-    parsed = JSON.parse(text.slice(start, end + 1));
+    parsed = JSON.parse(sanitized);
   } catch {
-    return null;
+    // Step 4: Last resort — try extracting individual fields with regex
+    const scoreMatch = sanitized.match(/"score"\s*:\s*"([^"]+)"/);
+    const vulnMatch = sanitized.match(/"vulnerabilities"\s*:\s*(\d+)/);
+    const summaryMatch = sanitized.match(/"summary"\s*:\s*"([^"]+)"/);
+    if (!scoreMatch || !vulnMatch) return null;
+    return {
+      score: scoreMatch[1],
+      vulnerabilities: parseInt(vulnMatch[1], 10),
+      summary: summaryMatch ? summaryMatch[1] : "",
+      suggestions: [],
+    };
   }
 
   const vulnerabilities = Number(parsed?.vulnerabilities);

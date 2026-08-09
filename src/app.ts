@@ -14,6 +14,7 @@ import {
   getActiveGeminiModel,
   generateChatResponse,
   enhanceImagePrompt,
+  generateImageVisual,
   auditCodeSnippet,
   AIProvider,
 } from "./lib/ai.js";
@@ -535,62 +536,102 @@ app.post("/api/chat", async (req: Request, res: Response) => {
 
 app.post("/api/image", async (req: Request, res: Response) => {
   const body = req.body || {};
-  const validated = validateTextField(body.prompt, "prompt");
-  if (!validated.ok) {
-    activity(
-      "request.reject",
-      { tool: "image", reason: validated.error },
-      "warn",
-    );
-    return res
-      .status(400)
-      .json({ success: false, tool: "image", error: validated.error });
-  }
-  const rawPrompt = validated.value;
-  const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
-  activity("ai.image", {
-    phase: "start",
-    provider,
-    promptPreview: preview(rawPrompt),
-  });
 
-  const result = await enhanceImagePrompt(rawPrompt, provider);
-  if (!result.ok) {
-    const status = aiErrorStatus(result.errorType);
-    activity(
-      "ai.error",
-      {
+  // Vision mode: image uploaded for analysis
+  const imageBase64: string | undefined =
+    typeof body.image === "string" && body.image.length > 0 ? body.image : undefined;
+
+  const rawPrompt: string = typeof body.prompt === "string" ? body.prompt.trim() : "";
+
+  // Require at least a prompt (for text-to-image) or an image (for vision)
+  if (!rawPrompt && !imageBase64) {
+    return res.status(400).json({ success: false, tool: "image", error: "prompt or image is required" });
+  }
+
+  const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
+  activity("ai.image", { phase: "start", provider, hasImage: !!imageBase64, promptPreview: preview(rawPrompt) });
+
+  // ── Vision mode: analyze the uploaded image ──────────────────────────────
+  if (imageBase64) {
+    const result = await enhanceImagePrompt(rawPrompt || "", provider, imageBase64);
+    if (!result.ok) {
+      const status = aiErrorStatus(result.errorType);
+      activity("ai.error", { tool: "image", errorType: result.errorType, status, details: result.error }, "error");
+      return res.status(status).json({
+        success: false,
         tool: "image",
+        error: "Image vision analysis unavailable",
         errorType: result.errorType,
-        status,
+        hint: aiErrorHint(result.errorType),
         details: result.error,
-      },
-      "error",
-    );
-    return res.status(status).json({
-      success: false,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    activity("ai.image", { phase: "vision_ok", chars: result.text.length });
+    return res.json({
+      success: true,
       tool: "image",
-      error: "Image prompt enhancement unavailable",
-      errorType: result.errorType,
-      hint: aiErrorHint(result.errorType),
-      details: result.error,
+      mode: "vision",
+      rawPrompt,
+      analysis: result.text,
+      model: result.model,
+      usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
       timestamp: new Date().toISOString(),
     });
   }
 
-  activity("ai.image", { phase: "ok", chars: result.text.length });
+  // ── Text-to-Image mode ────────────────────────────────────────────────────
+  // Step 1: Enhance the prompt
+  const validated = validateTextField(rawPrompt, "prompt");
+  if (!validated.ok) {
+    activity("request.reject", { tool: "image", reason: validated.error }, "warn");
+    return res.status(400).json({ success: false, tool: "image", error: validated.error });
+  }
+
+  const enhanceResult = await enhanceImagePrompt(validated.value, provider);
+  if (!enhanceResult.ok) {
+    const status = aiErrorStatus(enhanceResult.errorType);
+    activity("ai.error", { tool: "image", errorType: enhanceResult.errorType, status, details: enhanceResult.error }, "error");
+    return res.status(status).json({
+      success: false,
+      tool: "image",
+      error: "Image prompt enhancement unavailable",
+      errorType: enhanceResult.errorType,
+      hint: aiErrorHint(enhanceResult.errorType),
+      details: enhanceResult.error,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // Step 2: Generate image with Imagen 3
+  const imageResult = await generateImageVisual(enhanceResult.text);
+  if (!imageResult.ok) {
+    // Fallback: return enhanced prompt text and a placeholder if Imagen fails
+    activity("ai.image", { phase: "imagen_failed_fallback", reason: imageResult.error }, "warn");
+    return res.json({
+      success: true,
+      tool: "image",
+      mode: "text-to-image",
+      rawPrompt: validated.value,
+      enhancedPrompt: enhanceResult.text,
+      imageUrl: `https://placehold.co/512x512/0f172a/f59e0b?text=${encodeURIComponent(validated.value)}`,
+      imageFallback: true,
+      model: enhanceResult.model,
+      usage: { inputTokens: enhanceResult.inputTokens, outputTokens: enhanceResult.outputTokens },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  activity("ai.image", { phase: "ok", mode: "text-to-image" });
   return res.json({
     success: true,
     tool: "image",
-    rawPrompt,
-    enhancedPrompt: result.text,
-    imageUrl: `https://placehold.co/512x512/0f172a/f59e0b?text=${encodeURIComponent(rawPrompt)}`,
-    model: result.model,
-    truncated: result.truncated,
-    usage: {
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-    },
+    mode: "text-to-image",
+    rawPrompt: validated.value,
+    enhancedPrompt: enhanceResult.text,
+    imageUrl: imageResult.imageDataUri,
+    model: enhanceResult.model,
+    usage: { inputTokens: enhanceResult.inputTokens, outputTokens: enhanceResult.outputTokens },
     timestamp: new Date().toISOString(),
   });
 });
