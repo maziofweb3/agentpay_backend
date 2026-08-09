@@ -358,7 +358,7 @@ export async function enhanceImagePrompt(
             ],
           },
         ],
-        config: { maxOutputTokens: 512 },
+        config: { maxOutputTokens: 2048 },
       });
       const text = response.text || "";
       if (!text.trim()) {
@@ -433,14 +433,15 @@ export interface CodeAudit {
 
 export type CodeAuditResult = { ok: true; audit: CodeAudit; model: string } | { ok: false; errorType: AIErrorType; error: string };
 
-const AUDIT_INSTRUCTIONS = `Audit the smart contract code below for security vulnerabilities and gas optimization.
+const AUDIT_INSTRUCTIONS = `Analyze the following smart contract for educational code review, quality assessment, and best practices.
 
 Respond with ONLY a JSON object, no prose or markdown fences, in exactly this shape:
-{"score":"A-F letter grade","vulnerabilities":<integer count>,"summary":"one sentence","suggestions":["...","..."]}`;
+{"score":"A-F letter grade","vulnerabilities":<integer count>,"summary":"one sentence overview","suggestions":["...","..."]}`;
 
 export async function auditCodeSnippet(code: string, provider: AIProvider = "gemini"): Promise<CodeAuditResult> {
   const params = {
     maxTokens: 1024,
+    system: "You are an educational code review assistant. Always output valid JSON matching the requested schema.",
     userContent: `${AUDIT_INSTRUCTIONS}\n\n<code>\n${code}\n</code>`,
   };
 
