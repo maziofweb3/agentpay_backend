@@ -16,6 +16,7 @@ import {
   enhanceImagePrompt,
   generateImageVisual,
   auditCodeSnippet,
+  checkQuotaStatus,
   AIProvider,
 } from "./lib/ai.js";
 import {
@@ -31,6 +32,7 @@ import {
   preview,
   aiErrorStatus,
   aiErrorHint,
+  cleanErrorMessage,
 } from "./lib/validation.js";
 import { handleCreditsDeposit } from "./lib/prepaid-ledger.js";
 import { formatReputationSummary } from "./lib/erc8004.js";
@@ -230,6 +232,26 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
 
   if (billing === null) {
     return next();
+  }
+
+  // ★ Pre-Flight Quota Check — reject BEFORE payment challenge if model key is out of quota
+  const resolvedProvider: AIProvider = provider === "claude" ? "claude" : "gemini";
+  const quotaCheck = checkQuotaStatus(resolvedProvider);
+  if (quotaCheck.exceeded) {
+    activity(
+      "request.reject",
+      { path: fullPath, provider: resolvedProvider, reason: "quota_circuit_breaker", retryInSec: quotaCheck.retryInSec },
+      "warn"
+    );
+    return res.status(429).json({
+      success: false,
+      tool: fullPath,
+      error: `AI provider (${resolvedProvider}) free-tier quota is currently exhausted. Please retry in ${quotaCheck.retryInSec}s or switch model provider.`,
+      errorType: "rate_limit",
+      hint: `Google AI Studio free-tier limit reached (20 req/day for gemini-3.6-flash). Retry in ${quotaCheck.retryInSec}s or select Claude 3.5.`,
+      retryInSeconds: quotaCheck.retryInSec,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   const {
@@ -504,7 +526,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
         tool: "chat",
         errorType: result.errorType,
         status,
-        details: result.error,
+        details: cleanErrorMessage(result.error),
       },
       "error",
     );
@@ -568,7 +590,7 @@ app.post("/api/image", async (req: Request, res: Response) => {
     const result = await enhanceImagePrompt(rawPrompt || "", provider, imageBase64);
     if (!result.ok) {
       const status = aiErrorStatus(result.errorType);
-      activity("ai.error", { tool: "image", errorType: result.errorType, status, details: result.error }, "error");
+      activity("ai.error", { tool: "image", errorType: result.errorType, status, details: cleanErrorMessage(result.error) }, "error");
       return res.status(status).json({
         success: false,
         tool: "image",
@@ -606,7 +628,7 @@ app.post("/api/image", async (req: Request, res: Response) => {
   const enhanceResult = await enhanceImagePrompt(validated.value, provider);
   if (!enhanceResult.ok) {
     const status = aiErrorStatus(enhanceResult.errorType);
-    activity("ai.error", { tool: "image", errorType: enhanceResult.errorType, status, details: enhanceResult.error }, "error");
+    activity("ai.error", { tool: "image", errorType: enhanceResult.errorType, status, details: cleanErrorMessage(enhanceResult.error) }, "error");
     return res.status(status).json({
       success: false,
       tool: "image",
@@ -680,7 +702,7 @@ app.post("/api/code", async (req: Request, res: Response) => {
         tool: "code",
         errorType: result.errorType,
         status,
-        details: result.error,
+        details: cleanErrorMessage(result.error),
       },
       "error",
     );

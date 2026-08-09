@@ -1,5 +1,6 @@
 import { Anthropic } from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
+import { cleanErrorMessage } from "./validation.js";
 
 const AGENT_ROUTER_BASE_URL = "https://agentrouter.org";
 const REQUEST_TIMEOUT_MS = 45_000;
@@ -14,6 +15,34 @@ export type AIErrorType =
   | "network"
   | "empty_response"
   | "unknown";
+
+export interface QuotaStatus {
+  exceeded: boolean;
+  retryInSec: number;
+  message?: string;
+}
+
+const quotaExceededMap: Partial<Record<AIProvider, { until: number; message: string }>> = {};
+
+export function markQuotaExceeded(provider: AIProvider, retryDelaySec = 60, customMsg?: string): void {
+  const delaySec = Math.max(retryDelaySec, 15);
+  const until = Date.now() + delaySec * 1000;
+  quotaExceededMap[provider] = {
+    until,
+    message: customMsg || `AI provider (${provider}) free-tier quota exceeded. Please retry in ${delaySec}s or switch provider.`,
+  };
+}
+
+export function checkQuotaStatus(provider: AIProvider): QuotaStatus {
+  const state = quotaExceededMap[provider];
+  if (!state) return { exceeded: false, retryInSec: 0 };
+  if (Date.now() >= state.until) {
+    delete quotaExceededMap[provider];
+    return { exceeded: false, retryInSec: 0 };
+  }
+  const retryInSec = Math.ceil((state.until - Date.now()) / 1000);
+  return { exceeded: true, retryInSec, message: state.message };
+}
 
 export type AIResult =
   | { ok: true; text: string; model: string; inputTokens: number; outputTokens: number; truncated: boolean }
@@ -214,7 +243,8 @@ async function runAnthropicCompletion(
   } catch (err: any) {
     const durationMs = Date.now() - start;
     const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = err?.message || String(err);
+    const error = cleanErrorMessage(err?.message || String(err));
+    if (errorType === "rate_limit") markQuotaExceeded("claude", 60, error);
 
     console.error(`[AI] ✗ ${label} (Claude) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
     return { ok: false, errorType, error };
@@ -262,7 +292,12 @@ async function runGeminiCompletion(
   } catch (err: any) {
     const durationMs = Date.now() - start;
     const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = err?.message || String(err);
+    const error = cleanErrorMessage(err?.message || String(err));
+    if (errorType === "rate_limit") {
+      const retryMatch = String(err?.message || "").match(/Please retry in (\d+(?:\.\d+)?s?)/i);
+      const retrySec = retryMatch ? Math.round(parseFloat(retryMatch[1])) : 60;
+      markQuotaExceeded("gemini", retrySec, error);
+    }
 
     console.error(`[AI] ✗ ${label} (Gemini) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
     return { ok: false, errorType, error };
@@ -316,7 +351,12 @@ async function runGeminiJsonCompletion(
   } catch (err: any) {
     const durationMs = Date.now() - start;
     const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = err?.message || String(err);
+    const error = cleanErrorMessage(err?.message || String(err));
+    if (errorType === "rate_limit") {
+      const retryMatch = String(err?.message || "").match(/Please retry in (\d+(?:\.\d+)?s?)/i);
+      const retrySec = retryMatch ? Math.round(parseFloat(retryMatch[1])) : 60;
+      markQuotaExceeded("gemini", retrySec, error);
+    }
 
     console.error(`[AI] ✗ ${label} (Gemini/JSON) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
     return { ok: false, errorType, error };
@@ -382,8 +422,9 @@ export async function enhanceImagePrompt(
     } catch (err: any) {
       const durationMs = Date.now() - start;
       const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-      const error = err?.message || String(err);
-      console.error(`[AI] ✗ image vision (Gemini) failed in ${durationMs}ms [${errorType}]: ${error}`);
+      const error = cleanErrorMessage(err?.message || String(err));
+      if (errorType === "rate_limit") markQuotaExceeded(provider, 60, error);
+      console.error(`[AI] ✗ image vision (${provider}) failed in ${durationMs}ms [${errorType}]: ${error}`);
       return { ok: false, errorType, error };
     }
   }

@@ -72,3 +72,24 @@ export function aiErrorHint(errorType: AIErrorType): string {
       return "The AI request failed for an unexpected reason.";
   }
 }
+
+/** Format raw error messages into clean, single-line summaries for log readability. */
+export function cleanErrorMessage(rawMsg: string): string {
+  let msg = String(rawMsg || "").trim();
+  try {
+    const parsed = JSON.parse(msg);
+    if (parsed?.error?.message) msg = parsed.error.message;
+    else if (parsed?.message) msg = parsed.message;
+  } catch {
+    /* not JSON */
+  }
+
+  if (msg.includes("Quota exceeded for metric")) {
+    const retryMatch = msg.match(/Please retry in (\d+(?:\.\d+)?s?)/i);
+    const retry = retryMatch ? ` - Retry in ${Math.round(parseFloat(retryMatch[1]))}s` : "";
+    return `Quota exceeded for gemini-3.6-flash (limit 20 req/day)${retry}`;
+  }
+
+  const firstLine = msg.split("\n")[0].replace(/["']/g, "").trim();
+  return firstLine.length > 150 ? `${firstLine.slice(0, 147)}...` : firstLine;
+}
