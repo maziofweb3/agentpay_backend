@@ -174,6 +174,7 @@ export interface PromptTokenBillingInput {
   promptText?: string;
   provider?: string;
   modelKey?: string;
+  hasImage?: boolean;
   apayPriceUsd: number;
 }
 
@@ -208,7 +209,7 @@ export function formatApayTokens(tokens: number): string {
  * 1. Counts prompt input tokens (~1 token per 4 chars).
  * 2. Uses expected output token budget.
  * 3. Applies official model rate card.
- * 4. Adds 30% profit margin (+30%).
+ * 4. Adds 50% profit margin (+50%).
  * 5. Converts to required APAY wei based on live token price.
  */
 export function calculatePromptApayWei(
@@ -234,8 +235,18 @@ export function calculatePromptApayWei(
     selectedModelKey = "claude-3-5-sonnet";
     outputTokenBudget = 500;
   } else if (normPath === "/api/image") {
-    selectedModelKey = "imagen-3";
-    outputTokenBudget = 0;
+    if (input.hasImage) {
+      if (providerClean === "claude") {
+        selectedModelKey = "claude-3-5-sonnet";
+        outputTokenBudget = 250;
+      } else {
+        selectedModelKey = "gemini-3.6-flash";
+        outputTokenBudget = 250;
+      }
+    } else {
+      selectedModelKey = "imagen-3";
+      outputTokenBudget = 0;
+    }
   } else if (normPath === "/api/relay" || normPath === "/api/botchain/relay") {
     selectedModelKey = "gemini-3.6-flash";
     outputTokenBudget = 150;

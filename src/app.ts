@@ -218,11 +218,13 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
   const priceInfo = await getApayPriceUsd();
   const promptText = (req.body?.prompt ?? req.body?.code ?? req.body?.message ?? "").toString();
   const provider = (req.body?.provider ?? (req.headers["x-provider"] as string) ?? "").toString();
+  const hasImage = typeof req.body?.image === "string" && req.body.image.length > 0;
 
   const billing = calculatePromptApayWei({
     fullPath,
     promptText,
     provider,
+    hasImage,
     apayPriceUsd: priceInfo.priceUsd,
   });
 
