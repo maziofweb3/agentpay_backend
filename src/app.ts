@@ -511,7 +511,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     return res.status(status).json({
       success: false,
       tool: "chat",
-      error: "AI response unavailable",
+      error:
+        result.errorType === "rate_limit"
+          ? "AI provider quota/rate limit exceeded (429 RESOURCE_EXHAUSTED)"
+          : result.error || "AI response unavailable",
       errorType: result.errorType,
       hint: aiErrorHint(result.errorType),
       details: result.error,
@@ -569,7 +572,10 @@ app.post("/api/image", async (req: Request, res: Response) => {
       return res.status(status).json({
         success: false,
         tool: "image",
-        error: "Image vision analysis unavailable",
+        error:
+          result.errorType === "rate_limit"
+            ? "AI provider quota/rate limit exceeded (429 RESOURCE_EXHAUSTED)"
+            : result.error || "Image vision analysis unavailable",
         errorType: result.errorType,
         hint: aiErrorHint(result.errorType),
         details: result.error,
@@ -604,7 +610,10 @@ app.post("/api/image", async (req: Request, res: Response) => {
     return res.status(status).json({
       success: false,
       tool: "image",
-      error: "Image prompt enhancement unavailable",
+      error:
+        enhanceResult.errorType === "rate_limit"
+          ? "AI provider quota/rate limit exceeded (429 RESOURCE_EXHAUSTED)"
+          : enhanceResult.error || "Image prompt enhancement unavailable",
       errorType: enhanceResult.errorType,
       hint: aiErrorHint(enhanceResult.errorType),
       details: enhanceResult.error,
@@ -678,7 +687,10 @@ app.post("/api/code", async (req: Request, res: Response) => {
     return res.status(status).json({
       success: false,
       tool: "code",
-      error: "Code audit unavailable — no verdict was produced",
+      error:
+        result.errorType === "rate_limit"
+          ? "AI provider quota/rate limit exceeded (429 RESOURCE_EXHAUSTED)"
+          : result.error || "Code audit unavailable — no verdict was produced",
       errorType: result.errorType,
       hint: aiErrorHint(result.errorType),
       details: result.error,
