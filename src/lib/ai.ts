@@ -22,33 +22,119 @@ export interface QuotaStatus {
   message?: string;
 }
 
-const quotaExceededMap: Partial<Record<AIProvider, { until: number; message: string }>> = {};
-
-export function markQuotaExceeded(provider: AIProvider, retryDelaySec = 60, customMsg?: string): void {
-  const delaySec = Math.max(retryDelaySec, 15);
-  const until = Date.now() + delaySec * 1000;
-  quotaExceededMap[provider] = {
-    until,
-    message: customMsg || `AI provider (${provider}) free-tier quota exceeded. Please retry in ${delaySec}s or switch provider.`,
-  };
-}
-
-export function checkQuotaStatus(provider: AIProvider): QuotaStatus {
-  const state = quotaExceededMap[provider];
-  if (!state) return { exceeded: false, retryInSec: 0 };
-  if (Date.now() >= state.until) {
-    delete quotaExceededMap[provider];
-    return { exceeded: false, retryInSec: 0 };
-  }
-  const retryInSec = Math.ceil((state.until - Date.now()) / 1000);
-  return { exceeded: true, retryInSec, message: state.message };
-}
+export type AIProvider = "gemini" | "claude";
 
 export type AIResult =
   | { ok: true; text: string; model: string; inputTokens: number; outputTokens: number; truncated: boolean }
   | { ok: false; errorType: AIErrorType; error: string };
 
-export type AIProvider = "gemini" | "claude";
+/* -------------------------------------------------------------------------- */
+/* Multi-Key Pool & Cooldown Tracking                                        */
+/* -------------------------------------------------------------------------- */
+
+const keyCooldownMap = new Map<string, { until: number; message: string }>();
+const anthropicClientMap = new Map<string, Anthropic>();
+const geminiClientMap = new Map<string, GoogleGenAI>();
+
+function isPlaceholderKey(key: string): boolean {
+  return (
+    key.trim() === "" ||
+    key.includes("your_anthropic_claude_api_key_here") ||
+    key.includes("your_gemini_api_key_here")
+  );
+}
+
+function parseKeysFromEnv(primaryVar: string, fallbackVar?: string): string[] {
+  const raw = process.env[primaryVar] || (fallbackVar ? process.env[fallbackVar] : "") || "";
+  if (!raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0 && !isPlaceholderKey(k));
+}
+
+export function getProviderKeys(provider: AIProvider): string[] {
+  if (provider === "gemini") {
+    return parseKeysFromEnv("GEMINI_API_KEY", "GEMINI_API_KEYS");
+  }
+  return parseKeysFromEnv("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEYS");
+}
+
+export function markKeyExceeded(key: string, retryDelaySec = 60, customMsg?: string): void {
+  const delaySec = Math.max(retryDelaySec, 15);
+  const until = Date.now() + delaySec * 1000;
+  keyCooldownMap.set(key, {
+    until,
+    message: customMsg || `API key on cooldown for ${delaySec}s`,
+  });
+}
+
+export function isKeyAvailable(key: string): boolean {
+  const state = keyCooldownMap.get(key);
+  if (!state) return true;
+  if (Date.now() >= state.until) {
+    keyCooldownMap.delete(key);
+    return true;
+  }
+  return false;
+}
+
+export function getAvailableKeysForProvider(provider: AIProvider): string[] {
+  const allKeys = getProviderKeys(provider);
+  const available = allKeys.filter(isKeyAvailable);
+  return available.length > 0 ? available : allKeys;
+}
+
+export function markQuotaExceeded(provider: AIProvider, retryDelaySec = 60, customMsg?: string): void {
+  const keys = getAvailableKeysForProvider(provider);
+  for (const key of keys) {
+    markKeyExceeded(key, retryDelaySec, customMsg);
+  }
+}
+
+export function checkQuotaStatus(provider: AIProvider): QuotaStatus {
+  const allKeys = getProviderKeys(provider);
+  if (allKeys.length === 0) {
+    return {
+      exceeded: true,
+      retryInSec: 60,
+      message: `No ${provider} API keys configured in environment`,
+    };
+  }
+
+  const available = allKeys.filter(isKeyAvailable);
+  if (available.length > 0) {
+    return { exceeded: false, retryInSec: 0 };
+  }
+
+  // All keys are currently on cooldown! Find the key that will recover earliest
+  let earliestUntil = Infinity;
+  let customMsg = `All ${provider} API keys are currently exhausted.`;
+
+  for (const key of allKeys) {
+    const state = keyCooldownMap.get(key);
+    if (state && state.until < earliestUntil) {
+      earliestUntil = state.until;
+      if (state.message) customMsg = state.message;
+    }
+  }
+
+  if (!Number.isFinite(earliestUntil) || Date.now() >= earliestUntil) {
+    return { exceeded: false, retryInSec: 0 };
+  }
+
+  const retryInSec = Math.ceil((earliestUntil - Date.now()) / 1000);
+  return { exceeded: true, retryInSec, message: customMsg };
+}
+
+function maskKey(key: string): string {
+  if (!key || key.length <= 8) return "****";
+  return `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Client Constructors                                                        */
+/* -------------------------------------------------------------------------- */
 
 /** Resolved Claude model id from environment. */
 export function getActiveModel(): string {
@@ -64,59 +150,45 @@ export function getActiveGeminiModel(): string {
   return model;
 }
 
-function isPlaceholderKey(key: string): boolean {
-  return key.trim() === "" || key.includes("your_anthropic_claude_api_key_here") || key.includes("your_gemini_api_key_here");
-}
-
 function resolveBaseURL(apiKey: string): string | undefined {
   if (process.env.ANTHROPIC_BASE_URL) return process.env.ANTHROPIC_BASE_URL;
   return apiKey.startsWith("sk-ant-") ? undefined : AGENT_ROUTER_BASE_URL;
 }
 
-let cachedClient: Anthropic | null = null;
-let cachedClientKey: string | null = null;
-
-function getAnthropicClient(): Anthropic | null {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || isPlaceholderKey(apiKey)) {
-    throw new Error("FATAL: ANTHROPIC_API_KEY environment variable is missing or placeholder");
-  }
-
+function getAnthropicClientForKey(apiKey: string): Anthropic {
   const baseURL = resolveBaseURL(apiKey);
   const cacheKey = `${apiKey}|${baseURL ?? "default"}`;
-  if (cachedClient && cachedClientKey === cacheKey) return cachedClient;
-
-  cachedClient = new Anthropic({
-    apiKey,
-    baseURL,
-    defaultHeaders: baseURL
-      ? {
-          "User-Agent": process.env.ANTHROPIC_USER_AGENT || "Cline/3.0.0",
-          Accept: "application/json",
-        }
-      : undefined,
-    timeout: REQUEST_TIMEOUT_MS,
-    maxRetries: MAX_RETRIES,
-  });
-  cachedClientKey = cacheKey;
-  return cachedClient;
-}
-
-let cachedGeminiClient: GoogleGenAI | null = null;
-let cachedGeminiKey: string | null = null;
-
-function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || isPlaceholderKey(apiKey)) {
-    throw new Error("FATAL: GEMINI_API_KEY environment variable is missing or placeholder");
+  let client = anthropicClientMap.get(cacheKey);
+  if (!client) {
+    client = new Anthropic({
+      apiKey,
+      baseURL,
+      defaultHeaders: baseURL
+        ? {
+            "User-Agent": process.env.ANTHROPIC_USER_AGENT || "Cline/3.0.0",
+            Accept: "application/json",
+          }
+        : undefined,
+      timeout: REQUEST_TIMEOUT_MS,
+      maxRetries: MAX_RETRIES,
+    });
+    anthropicClientMap.set(cacheKey, client);
   }
-
-  if (cachedGeminiClient && cachedGeminiKey === apiKey) return cachedGeminiClient;
-
-  cachedGeminiClient = new GoogleGenAI({ apiKey });
-  cachedGeminiKey = apiKey;
-  return cachedGeminiClient;
+  return client;
 }
+
+function getGeminiClientForKey(apiKey: string): GoogleGenAI {
+  let client = geminiClientMap.get(apiKey);
+  if (!client) {
+    client = new GoogleGenAI({ apiKey });
+    geminiClientMap.set(apiKey, client);
+  }
+  return client;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Error Classification & Normalization                                      */
+/* -------------------------------------------------------------------------- */
 
 export function classifyError(err: any): AIErrorType {
   const status = err?.status ?? err?.response?.status ?? err?.error?.code ?? err?.code;
@@ -157,7 +229,11 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
   let resObj: any = rawResponse;
 
   for (let i = 0; i < 2 && typeof resObj === "string"; i++) {
-    if (resObj.trim().toLowerCase().startsWith("<!doctype") || resObj.toLowerCase().includes("aliyun_waf") || resObj.trim().toLowerCase().startsWith("<html")) {
+    if (
+      resObj.trim().toLowerCase().startsWith("<!doctype") ||
+      resObj.toLowerCase().includes("aliyun_waf") ||
+      resObj.trim().toLowerCase().startsWith("<html")
+    ) {
       throw new AIGatewayError(
         "AI gateway returned an HTML firewall verification page (WAF challenge)",
         "network"
@@ -211,157 +287,218 @@ export function normalizeAnthropicResponse(rawResponse: unknown): NormalizedResp
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Failover Execution Runners                                                 */
+/* -------------------------------------------------------------------------- */
+
 async function runAnthropicCompletion(
   label: string,
   params: { maxTokens: number; system?: string; userContent: string }
 ): Promise<AIResult> {
-  const client = getAnthropicClient();
-  const model = getActiveModel();
-
-  if (!client) {
+  const allKeys = getProviderKeys("claude");
+  if (allKeys.length === 0) {
     const error = "ANTHROPIC_API_KEY is not set — refusing to fabricate a response";
     console.error(`[AI] ✗ ${label} unavailable: ${error}`);
     return { ok: false, errorType: "no_key", error };
   }
 
-  const start = Date.now();
-  try {
-    const rawResponse = await client.messages.create({
-      model,
-      max_tokens: params.maxTokens,
-      ...(params.system ? { system: params.system } : {}),
-      messages: [{ role: "user", content: params.userContent }],
-    });
+  const keys = getAvailableKeysForProvider("claude");
+  const model = getActiveModel();
+  let lastErrorResult: AIResult | null = null;
 
-    const { text, inputTokens, outputTokens, truncated } = normalizeAnthropicResponse(rawResponse);
-    const durationMs = Date.now() - start;
+  for (let i = 0; i < keys.length; i++) {
+    const apiKey = keys[i];
+    const keyMasked = maskKey(apiKey);
+    const client = getAnthropicClientForKey(apiKey);
+    const start = Date.now();
 
-    console.log(
-      `[AI] ✓ ${label} (Claude) completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
-    );
-    return { ok: true, text, model, inputTokens, outputTokens, truncated };
-  } catch (err: any) {
-    const durationMs = Date.now() - start;
-    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = cleanErrorMessage(err?.message || String(err));
-    if (errorType === "rate_limit") markQuotaExceeded("claude", 60, error);
+    try {
+      const rawResponse = await client.messages.create({
+        model,
+        max_tokens: params.maxTokens,
+        ...(params.system ? { system: params.system } : {}),
+        messages: [{ role: "user", content: params.userContent }],
+      });
 
-    console.error(`[AI] ✗ ${label} (Claude) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
-    return { ok: false, errorType, error };
+      const { text, inputTokens, outputTokens, truncated } = normalizeAnthropicResponse(rawResponse);
+      const durationMs = Date.now() - start;
+
+      console.log(
+        `[AI] ✓ ${label} (Claude) [Key ${i + 1}/${keys.length} ${keyMasked}] completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
+      );
+      return { ok: true, text, model, inputTokens, outputTokens, truncated };
+    } catch (err: any) {
+      const durationMs = Date.now() - start;
+      const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+      const error = cleanErrorMessage(err?.message || String(err));
+
+      if (errorType === "rate_limit" || errorType === "auth") {
+        markKeyExceeded(apiKey, 60, error);
+        console.warn(
+          `[AI] ⚠️ ${label} (Claude) [Key ${i + 1}/${keys.length} ${keyMasked}] failed [${errorType}]: ${error}.${
+            i + 1 < keys.length ? ` Switching to key #${i + 2}...` : " All keys exhausted."
+          }`
+        );
+      } else {
+        console.error(
+          `[AI] ✗ ${label} (Claude) [Key ${i + 1}/${keys.length} ${keyMasked}] failed in ${durationMs}ms [${errorType}]: ${error}`
+        );
+      }
+      lastErrorResult = { ok: false, errorType, error };
+    }
   }
+
+  return lastErrorResult || { ok: false, errorType: "unknown", error: "Claude completion failed across all keys" };
 }
 
 async function runGeminiCompletion(
   label: string,
   params: { maxTokens: number; system?: string; userContent: string }
 ): Promise<AIResult> {
-  const client = getGeminiClient();
-  const model = getActiveGeminiModel();
-
-  if (!client) {
+  const allKeys = getProviderKeys("gemini");
+  if (allKeys.length === 0) {
     const error = "GEMINI_API_KEY is not set — refusing to fabricate a response";
     console.error(`[AI] ✗ ${label} unavailable: ${error}`);
     return { ok: false, errorType: "no_key", error };
   }
 
-  const start = Date.now();
-  try {
-    const response = await client.models.generateContent({
-      model,
-      contents: params.userContent,
-      config: {
-        ...(params.system ? { systemInstruction: params.system } : {}),
-        maxOutputTokens: params.maxTokens,
-      },
-    });
+  const keys = getAvailableKeysForProvider("gemini");
+  const model = getActiveGeminiModel();
+  let lastErrorResult: AIResult | null = null;
 
-    const text = response.text || "";
-    const durationMs = Date.now() - start;
+  for (let i = 0; i < keys.length; i++) {
+    const apiKey = keys[i];
+    const keyMasked = maskKey(apiKey);
+    const client = getGeminiClientForKey(apiKey);
+    const start = Date.now();
 
-    if (!text.trim()) {
-      throw new AIGatewayError("Gemini API returned an empty response text", "empty_response");
+    try {
+      const response = await client.models.generateContent({
+        model,
+        contents: params.userContent,
+        config: {
+          ...(params.system ? { systemInstruction: params.system } : {}),
+          maxOutputTokens: params.maxTokens,
+        },
+      });
+
+      const text = response.text || "";
+      const durationMs = Date.now() - start;
+
+      if (!text.trim()) {
+        throw new AIGatewayError("Gemini API returned an empty response text", "empty_response");
+      }
+
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+
+      console.log(
+        `[AI] ✓ ${label} (Gemini) [Key ${i + 1}/${keys.length} ${keyMasked}] completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
+      );
+      return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
+    } catch (err: any) {
+      const durationMs = Date.now() - start;
+      const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+      const error = cleanErrorMessage(err?.message || String(err));
+
+      if (errorType === "rate_limit" || errorType === "auth") {
+        const retryMatch = String(err?.message || "").match(/Please retry in (\d+(?:\.\d+)?s?)/i);
+        const retrySec = retryMatch ? Math.round(parseFloat(retryMatch[1])) : 60;
+        markKeyExceeded(apiKey, retrySec, error);
+
+        console.warn(
+          `[AI] ⚠️ ${label} (Gemini) [Key ${i + 1}/${keys.length} ${keyMasked}] failed [${errorType}]: ${error}.${
+            i + 1 < keys.length ? ` Switching to key #${i + 2}...` : " All keys exhausted."
+          }`
+        );
+      } else {
+        console.error(
+          `[AI] ✗ ${label} (Gemini) [Key ${i + 1}/${keys.length} ${keyMasked}] failed in ${durationMs}ms [${errorType}]: ${error}`
+        );
+      }
+      lastErrorResult = { ok: false, errorType, error };
     }
-
-    const inputTokens = response.usageMetadata?.promptTokenCount || 0;
-    const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
-
-    console.log(
-      `[AI] ✓ ${label} (Gemini) completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
-    );
-    return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
-  } catch (err: any) {
-    const durationMs = Date.now() - start;
-    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = cleanErrorMessage(err?.message || String(err));
-    if (errorType === "rate_limit") {
-      const retryMatch = String(err?.message || "").match(/Please retry in (\d+(?:\.\d+)?s?)/i);
-      const retrySec = retryMatch ? Math.round(parseFloat(retryMatch[1])) : 60;
-      markQuotaExceeded("gemini", retrySec, error);
-    }
-
-    console.error(`[AI] ✗ ${label} (Gemini) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
-    return { ok: false, errorType, error };
   }
+
+  return lastErrorResult || { ok: false, errorType: "unknown", error: "Gemini completion failed across all keys" };
 }
 
-/**
- * Like runGeminiCompletion, but passes responseMimeType: "application/json".
- * This forces Gemini to emit a raw JSON object — no markdown fences, no prose preamble.
- * Use this for any call that must produce structured JSON output.
- */
 async function runGeminiJsonCompletion(
   label: string,
   params: { maxTokens: number; system?: string; userContent: string }
 ): Promise<AIResult> {
-  const client = getGeminiClient();
-  const model = getActiveGeminiModel();
-
-  if (!client) {
+  const allKeys = getProviderKeys("gemini");
+  if (allKeys.length === 0) {
     const error = "GEMINI_API_KEY is not set — refusing to fabricate a response";
     console.error(`[AI] ✗ ${label} unavailable: ${error}`);
     return { ok: false, errorType: "no_key", error };
   }
 
-  const start = Date.now();
-  try {
-    const response = await client.models.generateContent({
-      model,
-      contents: params.userContent,
-      config: {
-        ...(params.system ? { systemInstruction: params.system } : {}),
-        maxOutputTokens: params.maxTokens,
-        responseMimeType: "application/json",
-      },
-    });
+  const keys = getAvailableKeysForProvider("gemini");
+  const model = getActiveGeminiModel();
+  let lastErrorResult: AIResult | null = null;
 
-    const text = response.text || "";
-    const durationMs = Date.now() - start;
+  for (let i = 0; i < keys.length; i++) {
+    const apiKey = keys[i];
+    const keyMasked = maskKey(apiKey);
+    const client = getGeminiClientForKey(apiKey);
+    const start = Date.now();
 
-    if (!text.trim()) {
-      throw new AIGatewayError("Gemini JSON API returned an empty response text", "empty_response");
+    try {
+      const response = await client.models.generateContent({
+        model,
+        contents: params.userContent,
+        config: {
+          ...(params.system ? { systemInstruction: params.system } : {}),
+          maxOutputTokens: params.maxTokens,
+          responseMimeType: "application/json",
+        },
+      });
+
+      const text = response.text || "";
+      const durationMs = Date.now() - start;
+
+      if (!text.trim()) {
+        throw new AIGatewayError("Gemini JSON API returned an empty response text", "empty_response");
+      }
+
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+
+      console.log(
+        `[AI] ✓ ${label} (Gemini/JSON) [Key ${i + 1}/${keys.length} ${keyMasked}] completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
+      );
+      return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
+    } catch (err: any) {
+      const durationMs = Date.now() - start;
+      const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+      const error = cleanErrorMessage(err?.message || String(err));
+
+      if (errorType === "rate_limit" || errorType === "auth") {
+        const retryMatch = String(err?.message || "").match(/Please retry in (\d+(?:\.\d+)?s?)/i);
+        const retrySec = retryMatch ? Math.round(parseFloat(retryMatch[1])) : 60;
+        markKeyExceeded(apiKey, retrySec, error);
+
+        console.warn(
+          `[AI] ⚠️ ${label} (Gemini/JSON) [Key ${i + 1}/${keys.length} ${keyMasked}] failed [${errorType}]: ${error}.${
+            i + 1 < keys.length ? ` Switching to key #${i + 2}...` : " All keys exhausted."
+          }`
+        );
+      } else {
+        console.error(
+          `[AI] ✗ ${label} (Gemini/JSON) [Key ${i + 1}/${keys.length} ${keyMasked}] failed in ${durationMs}ms [${errorType}]: ${error}`
+        );
+      }
+      lastErrorResult = { ok: false, errorType, error };
     }
-
-    const inputTokens = response.usageMetadata?.promptTokenCount || 0;
-    const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
-
-    console.log(
-      `[AI] ✓ ${label} (Gemini/JSON) completed in ${durationMs}ms with ${model} (${inputTokens} in / ${outputTokens} out tokens)`
-    );
-    return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
-  } catch (err: any) {
-    const durationMs = Date.now() - start;
-    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = cleanErrorMessage(err?.message || String(err));
-    if (errorType === "rate_limit") {
-      const retryMatch = String(err?.message || "").match(/Please retry in (\d+(?:\.\d+)?s?)/i);
-      const retrySec = retryMatch ? Math.round(parseFloat(retryMatch[1])) : 60;
-      markQuotaExceeded("gemini", retrySec, error);
-    }
-
-    console.error(`[AI] ✗ ${label} (Gemini/JSON) failed in ${durationMs}ms [${errorType}] with ${model}: ${error}`);
-    return { ok: false, errorType, error };
   }
+
+  return lastErrorResult || { ok: false, errorType: "unknown", error: "Gemini JSON completion failed across all keys" };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Public API Functions                                                       */
+/* -------------------------------------------------------------------------- */
 
 export async function generateChatResponse(prompt: string, provider: AIProvider = "gemini"): Promise<AIResult> {
   const params = {
@@ -374,7 +511,6 @@ export async function generateChatResponse(prompt: string, provider: AIProvider 
     return runAnthropicCompletion("chat", params);
   }
 
-  // Default: Gemini 2.5 Flash
   return runGeminiCompletion("chat", params);
 }
 
@@ -383,50 +519,70 @@ export async function enhanceImagePrompt(
   provider: AIProvider = "gemini",
   imageBase64?: string
 ): Promise<AIResult> {
-  // If an image is provided, use multimodal vision analysis
   if (imageBase64) {
-    const client = getGeminiClient();
-    const model = getActiveGeminiModel();
-    if (!client) {
+    const allKeys = getProviderKeys("gemini");
+    if (allKeys.length === 0) {
       return { ok: false, errorType: "no_key", error: "GEMINI_API_KEY is not set" };
     }
-    const start = Date.now();
-    try {
-      // Extract base64 data and mime type from data URL
-      const matches = imageBase64.match(/^data:([^;]+);base64,(.+)$/);
-      const mimeType = matches ? matches[1] : "image/jpeg";
-      const base64Data = matches ? matches[2] : imageBase64;
 
-      const response = await client.models.generateContent({
-        model,
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { text: prompt ? `Analyze this image and respond to: ${prompt}` : "Describe this image in detail, including style, colors, composition, and notable elements." },
-              { inlineData: { mimeType, data: base64Data } },
-            ],
-          },
-        ],
-        config: { maxOutputTokens: 2048 },
-      });
-      const text = response.text || "";
-      if (!text.trim()) {
-        throw new AIGatewayError("Gemini vision returned an empty response", "empty_response");
+    const keys = getAvailableKeysForProvider("gemini");
+    const model = getActiveGeminiModel();
+    let lastErrorResult: AIResult | null = null;
+
+    for (let i = 0; i < keys.length; i++) {
+      const apiKey = keys[i];
+      const keyMasked = maskKey(apiKey);
+      const client = getGeminiClientForKey(apiKey);
+      const start = Date.now();
+
+      try {
+        const matches = imageBase64.match(/^data:([^;]+);base64,(.+)$/);
+        const mimeType = matches ? matches[1] : "image/jpeg";
+        const base64Data = matches ? matches[2] : imageBase64;
+
+        const response = await client.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: prompt ? `Analyze this image and respond to: ${prompt}` : "Describe this image in detail, including style, colors, composition, and notable elements." },
+                { inlineData: { mimeType, data: base64Data } },
+              ],
+            },
+          ],
+          config: { maxOutputTokens: 2048 },
+        });
+
+        const text = response.text || "";
+        if (!text.trim()) {
+          throw new AIGatewayError("Gemini vision returned an empty response", "empty_response");
+        }
+
+        const durationMs = Date.now() - start;
+        const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+        const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+        console.log(`[AI] ✓ image vision (Gemini) [Key ${i + 1}/${keys.length} ${keyMasked}] completed in ${durationMs}ms`);
+        return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
+      } catch (err: any) {
+        const durationMs = Date.now() - start;
+        const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+        const error = cleanErrorMessage(err?.message || String(err));
+        if (errorType === "rate_limit" || errorType === "auth") {
+          markKeyExceeded(apiKey, 60, error);
+          console.warn(
+            `[AI] ⚠️ image vision (${provider}) [Key ${i + 1}/${keys.length} ${keyMasked}] failed [${errorType}]: ${error}.${
+              i + 1 < keys.length ? ` Switching to key #${i + 2}...` : " All keys exhausted."
+            }`
+          );
+        } else {
+          console.error(`[AI] ✗ image vision (${provider}) [Key ${i + 1}/${keys.length} ${keyMasked}] failed in ${durationMs}ms [${errorType}]: ${error}`);
+        }
+        lastErrorResult = { ok: false, errorType, error };
       }
-      const durationMs = Date.now() - start;
-      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
-      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
-      console.log(`[AI] ✓ image vision (Gemini) completed in ${durationMs}ms`);
-      return { ok: true, text, model, inputTokens, outputTokens, truncated: false };
-    } catch (err: any) {
-      const durationMs = Date.now() - start;
-      const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-      const error = cleanErrorMessage(err?.message || String(err));
-      if (errorType === "rate_limit") markQuotaExceeded(provider, 60, error);
-      console.error(`[AI] ✗ image vision (${provider}) failed in ${durationMs}ms [${errorType}]: ${error}`);
-      return { ok: false, errorType, error };
     }
+
+    return lastErrorResult || { ok: false, errorType: "unknown", error: "Gemini vision failed across all keys" };
   }
 
   const params = {
@@ -445,34 +601,55 @@ export async function enhanceImagePrompt(
 export async function generateImageVisual(
   enhancedPrompt: string
 ): Promise<{ ok: true; imageDataUri: string } | { ok: false; errorType: AIErrorType; error: string }> {
-  const client = getGeminiClient();
-  if (!client) {
+  const allKeys = getProviderKeys("gemini");
+  if (allKeys.length === 0) {
     return { ok: false, errorType: "no_key", error: "GEMINI_API_KEY is not set" };
   }
-  const start = Date.now();
-  try {
-    const response = await client.models.generateImages({
-      model: "imagen-3.0-generate-002",
-      prompt: enhancedPrompt,
-      config: { numberOfImages: 1, outputMimeType: "image/png" },
-    });
 
-    const image = response.generatedImages?.[0];
-    if (!image?.image?.imageBytes) {
-      throw new AIGatewayError("Imagen 3 returned no image bytes", "empty_response");
+  const keys = getAvailableKeysForProvider("gemini");
+  let lastError: { errorType: AIErrorType; error: string } | null = null;
+
+  for (let i = 0; i < keys.length; i++) {
+    const apiKey = keys[i];
+    const keyMasked = maskKey(apiKey);
+    const client = getGeminiClientForKey(apiKey);
+    const start = Date.now();
+
+    try {
+      const response = await client.models.generateImages({
+        model: "imagen-3.0-generate-002",
+        prompt: enhancedPrompt,
+        config: { numberOfImages: 1, outputMimeType: "image/png" },
+      });
+
+      const image = response.generatedImages?.[0];
+      if (!image?.image?.imageBytes) {
+        throw new AIGatewayError("Imagen 3 returned no image bytes", "empty_response");
+      }
+
+      const durationMs = Date.now() - start;
+      console.log(`[AI] ✓ image generation (Imagen 3) [Key ${i + 1}/${keys.length} ${keyMasked}] completed in ${durationMs}ms`);
+      const imageDataUri = `data:image/png;base64,${image.image.imageBytes}`;
+      return { ok: true, imageDataUri };
+    } catch (err: any) {
+      const durationMs = Date.now() - start;
+      const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
+      const error = cleanErrorMessage(err?.message || String(err));
+      if (errorType === "rate_limit" || errorType === "auth") {
+        markKeyExceeded(apiKey, 60, error);
+        console.warn(
+          `[AI] ⚠️ image generation (Imagen 3) [Key ${i + 1}/${keys.length} ${keyMasked}] failed [${errorType}]: ${error}.${
+            i + 1 < keys.length ? ` Switching to key #${i + 2}...` : " All keys exhausted."
+          }`
+        );
+      } else {
+        console.error(`[AI] ✗ image generation (Imagen 3) [Key ${i + 1}/${keys.length} ${keyMasked}] failed in ${durationMs}ms [${errorType}]: ${error}`);
+      }
+      lastError = { errorType, error };
     }
-
-    const durationMs = Date.now() - start;
-    console.log(`[AI] ✓ image generation (Imagen 3) completed in ${durationMs}ms`);
-    const imageDataUri = `data:image/png;base64,${image.image.imageBytes}`;
-    return { ok: true, imageDataUri };
-  } catch (err: any) {
-    const durationMs = Date.now() - start;
-    const errorType: AIErrorType = err instanceof AIGatewayError ? err.errorType : classifyError(err);
-    const error = err?.message || String(err);
-    console.error(`[AI] ✗ image generation (Imagen 3) failed in ${durationMs}ms [${errorType}]: ${error}`);
-    return { ok: false, errorType, error };
   }
+
+  return { ok: false, errorType: lastError?.errorType || "unknown", error: lastError?.error || "Imagen 3 failed across all keys" };
 }
 
 export interface CodeAudit {
@@ -482,7 +659,9 @@ export interface CodeAudit {
   suggestions: string[];
 }
 
-export type CodeAuditResult = { ok: true; audit: CodeAudit; model: string } | { ok: false; errorType: AIErrorType; error: string };
+export type CodeAuditResult =
+  | { ok: true; audit: CodeAudit; model: string }
+  | { ok: false; errorType: AIErrorType; error: string };
 
 const AUDIT_INSTRUCTIONS = `Analyze the following smart contract for educational code review, quality assessment, and best practices.
 
@@ -496,12 +675,10 @@ export async function auditCodeSnippet(code: string, provider: AIProvider = "gem
     userContent: `${AUDIT_INSTRUCTIONS}\n\n<code>\n${code}\n</code>`,
   };
 
-  // For Gemini: use JSON-mode (responseMimeType: "application/json") to guarantee
-  // raw JSON output with no markdown fences or prose wrapping.
-  // For Claude: use standard text completion with parseAuditJson sanitizer.
-  const result = provider === "claude"
-    ? await runAnthropicCompletion("code audit", params)
-    : await runGeminiJsonCompletion("code audit", params);
+  const result =
+    provider === "claude"
+      ? await runAnthropicCompletion("code audit", params)
+      : await runGeminiJsonCompletion("code audit", params);
 
   if (!result.ok) return result;
 
@@ -521,23 +698,19 @@ export async function auditCodeSnippet(code: string, provider: AIProvider = "gem
 }
 
 export function parseAuditJson(text: string): CodeAudit | null {
-  // Step 1: Strip Markdown code fences (```json ... ``` or ``` ... ```)
   let sanitized = text.replace(/```(?:json)?\s*/gi, "").replace(/```/g, "").trim();
 
-  // Step 2: Extract the first JSON object
   const start = sanitized.indexOf("{");
   const end = sanitized.lastIndexOf("}");
   if (start === -1 || end <= start) return null;
   sanitized = sanitized.slice(start, end + 1);
 
-  // Step 3: Remove trailing commas before } or ] (common AI output mistake)
   sanitized = sanitized.replace(/,\s*([}\]])/g, "$1");
 
   let parsed: any;
   try {
     parsed = JSON.parse(sanitized);
   } catch {
-    // Step 4: Last resort — try extracting individual fields with regex
     const scoreMatch = sanitized.match(/"score"\s*:\s*"([^"]+)"/);
     const vulnMatch = sanitized.match(/"vulnerabilities"\s*:\s*(\d+)/);
     const summaryMatch = sanitized.match(/"summary"\s*:\s*"([^"]+)"/);
@@ -566,8 +739,7 @@ export function parseAuditJson(text: string): CodeAudit | null {
 }
 
 export function __resetClientCache(): void {
-  cachedClient = null;
-  cachedClientKey = null;
-  cachedGeminiClient = null;
-  cachedGeminiKey = null;
+  keyCooldownMap.clear();
+  anthropicClientMap.clear();
+  geminiClientMap.clear();
 }
