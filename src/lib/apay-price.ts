@@ -65,10 +65,10 @@ export const OUTPUT_BUDGET_CONFIG: Record<
   ServiceType,
   { ratio: number; min: number; max: number }
 > = {
-  chat: { ratio: 2.0, min: 640, max: 2048 },
-  relay: { ratio: 2.0, min: 640, max: 2048 },
-  code: { ratio: 3.0, min: 1000, max: 2560 },
-  image: { ratio: 1.5, min: 750, max: 2048 },
+  chat: { ratio: 2.0, min: 512, max: 1536 },
+  relay: { ratio: 2.0, min: 512, max: 1536 },
+  code: { ratio: 3.0, min: 800, max: 2048 },
+  image: { ratio: 1.5, min: 600, max: 1536 },
 } as const;
 
 export interface IntentClassification {
@@ -83,32 +83,32 @@ export function classifyPromptIntent(
   const normPath = fullPath.replace(/\/+$/, "") || "/";
   const p = prompt.toLowerCase().trim();
 
-  // 1. Code / Smart Contract / Security Audit Route & Queries (Tier 3) -> 1,920 tokens (2.5x)
+  // 1. Code / Smart Contract / Security Audit Route & Queries (Tier 3) -> 1,536 tokens (2.0x)
   if (
     normPath === "/api/code" ||
     /audit|solidity|contract|refactor|vulnerability|bytecode|reentrancy/i.test(p)
   ) {
-    return { category: "code_complex", budget: 1920 };
+    return { category: "code_complex", budget: 1536 };
   }
 
-  // 2. Open-Ended Concept Explanation / Summarization / Deep Dive (Tier 2) -> 1,280 tokens (2.5x)
+  // 2. Open-Ended Concept Explanation / Summarization / Deep Dive (Tier 2) -> 1,024 tokens (2.0x)
   if (
     /^(explain|describe|overview|how\s+does|how\s+do|why\s+does|why\s+do|history\s+of|compare|difference\s+between|tell\s+me\s+about|what\s+is\s+a)\s/i.test(p) ||
     p.length > 120
   ) {
-    return { category: "explanation", budget: 1280 };
+    return { category: "explanation", budget: 1024 };
   }
 
-  // 3. Direct Factual Q&A (Tier 1) -> 640 tokens (2.5x)
+  // 3. Direct Factual Q&A (Tier 1) -> 512 tokens (2.0x)
   if (
     /^(who|what|when|where|is|was|are|can|does|did|name)\s/i.test(p) &&
     p.length < 80
   ) {
-    return { category: "direct_fact", budget: 640 };
+    return { category: "direct_fact", budget: 512 };
   }
 
-  // 4. Default Fallback -> 960 tokens (2.5x)
-  return { category: "general", budget: 960 };
+  // 4. Default Fallback -> 768 tokens (2.0x)
+  return { category: "general", budget: 768 };
 }
 
 export function calculateOutputBudget(
