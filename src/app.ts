@@ -120,11 +120,15 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-const rawNetworkEnv = process.env.X402_NETWORK ?? "testnet";
+const defaultNetwork =
+  process.env.NODE_ENV === "production" || process.env.RENDER === "true"
+    ? "mainnet"
+    : "testnet";
+const rawNetworkEnv = process.env.X402_NETWORK ?? defaultNetwork;
 const rawNetwork =
   rawNetworkEnv === "mainnet" || rawNetworkEnv === "testnet"
     ? rawNetworkEnv
-    : "testnet";
+    : defaultNetwork;
 const isMainnet = rawNetwork === "mainnet";
 
 const botChainTestnetCaip = "eip155:968" as const;
