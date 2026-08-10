@@ -500,10 +500,18 @@ async function runGeminiJsonCompletion(
 /* Public API Functions                                                       */
 /* -------------------------------------------------------------------------- */
 
-export async function generateChatResponse(prompt: string, provider: AIProvider = "gemini"): Promise<AIResult> {
+export async function generateChatResponse(
+  prompt: string,
+  provider: AIProvider = "gemini",
+  maxTokens?: number
+): Promise<AIResult> {
+  const budget = maxTokens ?? 256;
+  const targetWords = Math.max(20, Math.floor(budget * 0.75));
   const params = {
-    maxTokens: 1024,
-    system: "You are AgentPay AI, a fast, helpful AI assistant built on BotChain. Provide concise, helpful answers.",
+    maxTokens: budget,
+    system: `You are AgentPay AI, a fast, helpful AI assistant built on BotChain.
+IMPORTANT: Provide concise, summarized answers. Keep responses brief and strictly to the point.
+Target response length: roughly ${targetWords} words maximum (${budget} tokens).`,
     userContent: prompt,
   };
 
@@ -517,9 +525,11 @@ export async function generateChatResponse(prompt: string, provider: AIProvider 
 export async function enhanceImagePrompt(
   prompt: string,
   provider: AIProvider = "gemini",
-  imageBase64?: string
+  imageBase64?: string,
+  maxTokens?: number
 ): Promise<AIResult> {
   if (imageBase64) {
+    const budget = maxTokens ?? 250;
     const allKeys = getProviderKeys("gemini");
     if (allKeys.length === 0) {
       return { ok: false, errorType: "no_key", error: "GEMINI_API_KEY is not set" };
@@ -551,7 +561,7 @@ export async function enhanceImagePrompt(
               ],
             },
           ],
-          config: { maxOutputTokens: 2048 },
+          config: { maxOutputTokens: budget },
         });
 
         const text = response.text || "";
@@ -668,10 +678,15 @@ const AUDIT_INSTRUCTIONS = `Analyze the following smart contract for educational
 Respond with ONLY a JSON object, no prose or markdown fences, in exactly this shape:
 {"score":"A-F letter grade","vulnerabilities":<integer count>,"summary":"one sentence overview","suggestions":["...","..."]}`;
 
-export async function auditCodeSnippet(code: string, provider: AIProvider = "gemini"): Promise<CodeAuditResult> {
+export async function auditCodeSnippet(
+  code: string,
+  provider: AIProvider = "gemini",
+  maxTokens?: number
+): Promise<CodeAuditResult> {
+  const budget = maxTokens ?? 500;
   const params = {
-    maxTokens: 1024,
-    system: "You are an educational code review assistant. Always output valid JSON matching the requested schema.",
+    maxTokens: budget,
+    system: `You are an educational code review assistant. Always output valid JSON matching the requested schema. Keep summary concise and limit suggestions to top findings within ${budget} output tokens.`,
     userContent: `${AUDIT_INSTRUCTIONS}\n\n<code>\n${code}\n</code>`,
   };
 

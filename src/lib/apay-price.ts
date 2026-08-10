@@ -46,6 +46,11 @@ export const MODEL_RATES: Record<string, ModelRateCard> = {
     inMTokUsd: 1.00,
     outMTokUsd: 5.00,
   },
+  "claude-opus-5": {
+    name: "Anthropic Claude Opus 5",
+    inMTokUsd: 5.00,
+    outMTokUsd: 25.00,
+  },
   "imagen-3": {
     name: "AI Image Generation",
     inMTokUsd: 0,
@@ -53,6 +58,28 @@ export const MODEL_RATES: Record<string, ModelRateCard> = {
     perItemUsd: 0.0390,
   },
 };
+
+export type ServiceType = "chat" | "relay" | "code" | "image";
+
+export const OUTPUT_BUDGET_CONFIG: Record<
+  ServiceType,
+  { ratio: number; min: number; max: number }
+> = {
+  chat: { ratio: 2.0, min: 100, max: 512 },
+  relay: { ratio: 2.0, min: 100, max: 512 },
+  code: { ratio: 3.0, min: 200, max: 1024 },
+  image: { ratio: 1.5, min: 100, max: 512 },
+} as const;
+
+export function calculateOutputBudget(
+  inputTokens: number,
+  serviceType: ServiceType
+): number {
+  const cfg = OUTPUT_BUDGET_CONFIG[serviceType];
+  if (!cfg) return 150;
+  const dynamic = Math.ceil(inputTokens * cfg.ratio);
+  return Math.min(Math.max(dynamic, cfg.min), cfg.max);
+}
 
 /**
  * Default Benchmark Single Source of Truth Base Compute Unit Cost in USD ($0.0078).
@@ -220,42 +247,40 @@ export function calculatePromptApayWei(
   const providerClean = (input.provider ?? "").toLowerCase().trim();
   const priceUsd = input.apayPriceUsd > 0 ? input.apayPriceUsd : getFallbackPriceUsd();
 
+  const inputTokens = Math.max(1, Math.ceil(promptStr.length / 4));
+
   let selectedModelKey = input.modelKey ?? "";
-  let outputTokenBudget = 150;
+  let serviceType: ServiceType | null = null;
+  let isImagen = false;
 
   if (normPath === "/api/chat") {
-    if (providerClean === "claude") {
-      selectedModelKey = "claude-3-5-sonnet";
-      outputTokenBudget = 200;
-    } else {
-      selectedModelKey = "gemini-3.6-flash";
-      outputTokenBudget = 150;
-    }
+    selectedModelKey = providerClean === "claude" ? "claude-3-5-sonnet" : "gemini-3.6-flash";
+    serviceType = "chat";
   } else if (normPath === "/api/code") {
     selectedModelKey = "claude-3-5-sonnet";
-    outputTokenBudget = 500;
+    serviceType = "code";
   } else if (normPath === "/api/image") {
     if (input.hasImage) {
-      if (providerClean === "claude") {
-        selectedModelKey = "claude-3-5-sonnet";
-        outputTokenBudget = 250;
-      } else {
-        selectedModelKey = "gemini-3.6-flash";
-        outputTokenBudget = 250;
-      }
+      selectedModelKey = providerClean === "claude" ? "claude-3-5-sonnet" : "gemini-3.6-flash";
+      serviceType = "image";
     } else {
       selectedModelKey = "imagen-3";
-      outputTokenBudget = 0;
+      isImagen = true;
     }
   } else if (normPath === "/api/relay" || normPath === "/api/botchain/relay") {
     selectedModelKey = "gemini-3.6-flash";
-    outputTokenBudget = 150;
+    serviceType = "relay";
   } else {
     return null;
   }
 
+  const outputTokenBudget = isImagen
+    ? 0
+    : serviceType
+    ? calculateOutputBudget(inputTokens, serviceType)
+    : 150;
+
   const rateCard = MODEL_RATES[selectedModelKey] ?? MODEL_RATES["gemini-3.6-flash"];
-  const inputTokens = Math.max(1, Math.ceil(promptStr.length / 4));
 
   let rawComputeUsd = 0;
   if (rateCard.perItemUsd) {

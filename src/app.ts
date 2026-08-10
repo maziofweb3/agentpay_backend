@@ -523,7 +523,19 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     promptPreview: preview(prompt),
   });
 
-  const result = await generateChatResponse(prompt, provider);
+  const priceInfo = await getApayPriceUsd();
+  const billing = calculatePromptApayWei({
+    fullPath: "/api/chat",
+    promptText: prompt,
+    provider,
+    apayPriceUsd: priceInfo.priceUsd,
+  });
+
+  const result = await generateChatResponse(
+    prompt,
+    provider,
+    billing?.outputTokenBudget
+  );
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
     activity(
@@ -593,7 +605,20 @@ app.post("/api/image", async (req: Request, res: Response) => {
 
   // ── Vision mode: analyze the uploaded image ──────────────────────────────
   if (imageBase64) {
-    const result = await enhanceImagePrompt(rawPrompt || "", provider, imageBase64);
+    const priceInfo = await getApayPriceUsd();
+    const billing = calculatePromptApayWei({
+      fullPath: "/api/image",
+      promptText: rawPrompt || "",
+      provider,
+      hasImage: true,
+      apayPriceUsd: priceInfo.priceUsd,
+    });
+    const result = await enhanceImagePrompt(
+      rawPrompt || "",
+      provider,
+      imageBase64,
+      billing?.outputTokenBudget
+    );
     if (!result.ok) {
       const status = aiErrorStatus(result.errorType);
       activity("ai.error", { tool: "image", errorType: result.errorType, status, details: cleanErrorMessage(result.error) }, "error");
@@ -699,7 +724,19 @@ app.post("/api/code", async (req: Request, res: Response) => {
   const provider: AIProvider = body.provider === "claude" ? "claude" : "gemini";
   activity("ai.code", { phase: "start", provider, codePreview: preview(code) });
 
-  const result = await auditCodeSnippet(code, provider);
+  const priceInfo = await getApayPriceUsd();
+  const billing = calculatePromptApayWei({
+    fullPath: "/api/code",
+    promptText: code,
+    provider,
+    apayPriceUsd: priceInfo.priceUsd,
+  });
+
+  const result = await auditCodeSnippet(
+    code,
+    provider,
+    billing?.outputTokenBudget
+  );
   if (!result.ok) {
     const status = aiErrorStatus(result.errorType);
     activity(
