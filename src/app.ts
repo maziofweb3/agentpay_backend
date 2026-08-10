@@ -138,22 +138,21 @@ const activeBotChainCaip = isMainnet
   : botChainTestnetCaip;
 const activeChainId = isMainnet ? 677 : 968;
 
-const rpcUrlEnv = process.env.BOTCHAIN_RPC_URL;
-if (!rpcUrlEnv)
-  throw new Error("FATAL: BOTCHAIN_RPC_URL environment variable is missing");
-const activeRpcUrl = rpcUrlEnv;
+const activeRpcUrl = isMainnet
+  ? (process.env.BOTCHAIN_MAINNET_RPC_URL || process.env.BOTCHAIN_RPC_URL || "https://rpc.botchain.ai")
+  : (process.env.BOTCHAIN_TESTNET_RPC_URL || process.env.BOTCHAIN_RPC_URL || "https://rpc.bohr.life");
 
-const apayEnv = process.env.APAY_TOKEN_ADDRESS;
-if (!apayEnv)
-  throw new Error("FATAL: APAY_TOKEN_ADDRESS environment variable is missing");
-const apayAddress = apayEnv as `0x${string}`;
+const apayAddress = (
+  isMainnet
+    ? (process.env.APAY_TOKEN_ADDRESS_MAINNET || process.env.APAY_TOKEN_ADDRESS || "")
+    : (process.env.APAY_TOKEN_ADDRESS_TESTNET || process.env.APAY_TOKEN_ADDRESS || "0xFd7bF688d5a772A81DfE39da502F69FD99cE92c7")
+) as `0x${string}`;
 
-const payToEnv = process.env.PAYMENT_RECIPIENT_ADDRESS;
-if (!payToEnv)
-  throw new Error(
-    "FATAL: PAYMENT_RECIPIENT_ADDRESS environment variable is missing",
-  );
-const payToAddress = payToEnv as `0x${string}`;
+const payToAddress = (
+  isMainnet
+    ? (process.env.PAYMENT_RECIPIENT_ADDRESS_MAINNET || process.env.PAYMENT_RECIPIENT_ADDRESS || "")
+    : (process.env.PAYMENT_RECIPIENT_ADDRESS_TESTNET || process.env.PAYMENT_RECIPIENT_ADDRESS || "0xc1eBB154EFf9bf9c08e39978E1447cC05e726dC6")
+) as `0x${string}`;
 
 const server = new x402ResourceServer(facilitator);
 server.register(activeBotChainCaip, new ExactEvmScheme());
