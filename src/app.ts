@@ -72,10 +72,15 @@ app.use(
 // Route-aware JSON body limit:
 //   /api/image — 10 MB (accepts base64-encoded image uploads up to ~7 MB)
 //   all others  — 1 MB  (tight limit to prevent abuse)
+const jsonParserImage = express.json({ limit: "10mb" });
+const jsonParserDefault = express.json({ limit: "1mb" });
+
 app.use((req: Request, res: Response, next: NextFunction) => {
-  const path = (req.baseUrl || "") + (req.path || "");
-  const limit = path.includes("/api/image") ? "10mb" : "1mb";
-  return express.json({ limit })(req, res, next);
+  const url = req.originalUrl || req.url || "";
+  if (url.includes("/api/image")) {
+    return jsonParserImage(req, res, next);
+  }
+  return jsonParserDefault(req, res, next);
 });
 
 function formatApay(amount: bigint | string): string {
