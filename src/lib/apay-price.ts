@@ -71,14 +71,63 @@ export const OUTPUT_BUDGET_CONFIG: Record<
   image: { ratio: 1.5, min: 300, max: 768 },
 } as const;
 
+export interface IntentClassification {
+  category: "direct_fact" | "explanation" | "code_complex" | "general";
+  budget: number;
+}
+
+export function classifyPromptIntent(
+  prompt: string,
+  fullPath: string = "/api/chat"
+): IntentClassification {
+  const normPath = fullPath.replace(/\/+$/, "") || "/";
+  const p = prompt.toLowerCase().trim();
+
+  // 1. Code / Smart Contract / Security Audit Route & Queries (Tier 3)
+  if (
+    normPath === "/api/code" ||
+    /audit|solidity|contract|refactor|vulnerability|bytecode|reentrancy/i.test(p)
+  ) {
+    return { category: "code_complex", budget: 768 };
+  }
+
+  // 2. Open-Ended Concept Explanation / Summarization / Deep Dive (Tier 2)
+  if (
+    /^(explain|describe|overview|how\s+does|how\s+do|why\s+does|why\s+do|history\s+of|compare|difference\s+between|tell\s+me\s+about|what\s+is\s+a)\s/i.test(p) ||
+    p.length > 120
+  ) {
+    return { category: "explanation", budget: 512 };
+  }
+
+  // 3. Direct Factual Q&A (Tier 1)
+  if (
+    /^(who|what|when|where|is|was|are|can|does|did|name)\s/i.test(p) &&
+    p.length < 80
+  ) {
+    return { category: "direct_fact", budget: 256 };
+  }
+
+  // 4. Default Fallback
+  return { category: "general", budget: 384 };
+}
+
 export function calculateOutputBudget(
   inputTokens: number,
-  serviceType: ServiceType
+  serviceType: ServiceType,
+  promptStr?: string,
+  fullPath?: string
 ): number {
   const cfg = OUTPUT_BUDGET_CONFIG[serviceType];
-  if (!cfg) return 150;
-  const dynamic = Math.ceil(inputTokens * cfg.ratio);
-  return Math.min(Math.max(dynamic, cfg.min), cfg.max);
+  if (!cfg) return 256;
+
+  let baseBudget = cfg.min;
+  if (promptStr) {
+    const intent = classifyPromptIntent(promptStr, fullPath ?? "/api/chat");
+    baseBudget = Math.max(cfg.min, intent.budget);
+  }
+
+  const dynamic = Math.max(baseBudget, Math.ceil(inputTokens * cfg.ratio));
+  return Math.min(dynamic, cfg.max);
 }
 
 /**
@@ -277,8 +326,8 @@ export function calculatePromptApayWei(
   const outputTokenBudget = isImagen
     ? 0
     : serviceType
-    ? calculateOutputBudget(inputTokens, serviceType)
-    : 150;
+    ? calculateOutputBudget(inputTokens, serviceType, promptStr, normPath)
+    : 256;
 
   const rateCard = MODEL_RATES[selectedModelKey] ?? MODEL_RATES["gemini-3.6-flash"];
 
