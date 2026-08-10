@@ -209,17 +209,20 @@ export async function getApayPriceUsd(): Promise<ApayPriceInfo> {
       const res = await fetch(apiUrl);
       if (res.ok) {
         const data = (await res.json()) as any;
-        const fetchedPrice =
-          typeof data === "number"
+        const rawVal =
+          typeof data === "number" || typeof data === "string"
             ? data
-            : data?.usd ??
+            : data?.data?.price ??
+              data?.data?.priceUsd ??
               data?.price ??
               data?.priceUsd ??
+              data?.usd ??
               data?.["agent-pay"]?.usd ??
               data?.["agentpay"]?.usd;
 
-        if (typeof fetchedPrice === "number" && fetchedPrice > 0) {
-          priceUsd = fetchedPrice;
+        const parsedVal = typeof rawVal === "number" ? rawVal : parseFloat(String(rawVal ?? ""));
+        if (!isNaN(parsedVal) && parsedVal > 0) {
+          priceUsd = parsedVal;
           source = "api";
         }
       }
