@@ -134,3 +134,48 @@ export const facilitator: FacilitatorClient = {
     };
   },
 };
+
+export interface FacilitatorHealth {
+  url: string;
+  status: "healthy" | "unreachable" | "error";
+  statusCode?: number;
+  latencyMs?: number;
+  data?: any;
+  error?: string;
+}
+
+export async function checkFacilitatorHealth(timeoutMs = 5000): Promise<FacilitatorHealth> {
+  const bofUrl = getBofUrl();
+  const start = Date.now();
+  try {
+    const res = await fetch(`${bofUrl}/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const latencyMs = Date.now() - start;
+    if (!res.ok) {
+      return {
+        url: bofUrl,
+        status: "error",
+        statusCode: res.status,
+        latencyMs,
+        error: `HTTP ${res.status}`,
+      };
+    }
+    const data = await res.json().catch(() => null);
+    return {
+      url: bofUrl,
+      status: "healthy",
+      statusCode: res.status,
+      latencyMs,
+      data,
+    };
+  } catch (err: any) {
+    const latencyMs = Date.now() - start;
+    return {
+      url: bofUrl,
+      status: "unreachable",
+      latencyMs,
+      error: err?.message || String(err),
+    };
+  }
+}

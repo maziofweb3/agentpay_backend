@@ -8,7 +8,7 @@ import cors from "cors";
 import { paymentMiddleware } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { x402ResourceServer, RoutesConfig } from "@x402/core/server";
-import { facilitator } from "./lib/x402-facilitator.js";
+import { facilitator, checkFacilitatorHealth } from "./lib/x402-facilitator.js";
 import {
   getActiveModel,
   getActiveGeminiModel,
@@ -169,9 +169,14 @@ app.get("/api/price", async (_req: Request, res: Response) => {
 
 // Health check endpoints
 const healthHandler = async (_req: Request, res: Response) => {
-  const priceInfo = await getApayPriceUsd();
+  const [priceInfo, facilitatorHealth] = await Promise.all([
+    getApayPriceUsd(),
+    checkFacilitatorHealth(),
+  ]);
+
+  const isHealthy = facilitatorHealth.status === "healthy";
   return res.json({
-    status: "ok",
+    status: isHealthy ? "ok" : "degraded",
     service: "AgentPay AI API Gateway (Express)",
     timestamp: new Date().toISOString(),
     aiProvider: `Google ${getActiveGeminiModel()} (Default) / Anthropic ${getActiveModel()}`,
@@ -199,6 +204,7 @@ const healthHandler = async (_req: Request, res: Response) => {
     relayEndpoint: "/api/botchain/relay",
     payTo: payToAddress,
     payToType: "AgentPayRegistry UUPS ERC1967 Proxy Smart Contract Vault",
+    facilitator: facilitatorHealth,
   });
 };
 
