@@ -65,10 +65,10 @@ export const OUTPUT_BUDGET_CONFIG: Record<
   ServiceType,
   { ratio: number; min: number; max: number }
 > = {
-  chat: { ratio: 2.0, min: 100, max: 512 },
-  relay: { ratio: 2.0, min: 100, max: 512 },
-  code: { ratio: 3.0, min: 200, max: 1024 },
-  image: { ratio: 1.5, min: 100, max: 512 },
+  chat: { ratio: 2.0, min: 256, max: 768 },
+  relay: { ratio: 2.0, min: 256, max: 768 },
+  code: { ratio: 3.0, min: 400, max: 1024 },
+  image: { ratio: 1.5, min: 300, max: 768 },
 } as const;
 
 export function calculateOutputBudget(

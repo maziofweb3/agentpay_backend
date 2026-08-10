@@ -506,12 +506,10 @@ export async function generateChatResponse(
   maxTokens?: number
 ): Promise<AIResult> {
   const budget = maxTokens ?? 256;
-  const targetWords = Math.max(20, Math.floor(budget * 0.75));
   const params = {
     maxTokens: budget,
     system: `You are AgentPay AI, a fast, helpful AI assistant built on BotChain.
-IMPORTANT: Provide concise, summarized answers. Keep responses brief and strictly to the point.
-Target response length: roughly ${targetWords} words maximum (${budget} tokens).`,
+Provide complete, clear, and direct answers without unnecessary filler. Always complete your sentences fully.`,
     userContent: prompt,
   };
 
