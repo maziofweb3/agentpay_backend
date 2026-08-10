@@ -41,6 +41,32 @@ import {
   getApayPriceUsd,
   calculatePromptApayWei,
 } from "./lib/apay-price.js";
+import { createPublicClient, http, isAddress, parseAbi } from "viem";
+
+async function checkApayOnChainBalance(
+  userAddress: string,
+  tokenAddress: `0x${string}`,
+  rpcUrl: string
+): Promise<bigint> {
+  if (!userAddress || !isAddress(userAddress) || !tokenAddress || !isAddress(tokenAddress)) {
+    return BigInt(0);
+  }
+  try {
+    const client = createPublicClient({ transport: http(rpcUrl) });
+    const bal = await client.readContract({
+      address: tokenAddress,
+      abi: parseAbi([
+        "function balanceOf(address account) view returns (uint256)",
+      ]),
+      functionName: "balanceOf",
+      args: [userAddress as `0x${string}`],
+    });
+    return bal as bigint;
+  } catch (err) {
+    console.warn(`[balance-check] Failed to read on-chain APAY balance for ${userAddress}:`, err);
+    return BigInt(0);
+  }
+}
 
 const app = express();
 
@@ -331,6 +357,33 @@ app.use("/api/*", async (req: Request, res: Response, next: NextFunction) => {
         amount: formatApay(paymentValue),
         from: String(payload.from).slice(0, 12),
       });
+
+      // ★ Strict On-Chain Balance Check — reject if wallet lacks required APAY balance on-chain
+      const userOnChainBalance = await checkApayOnChainBalance(
+        payload.from,
+        apayAddress,
+        activeRpcUrl
+      );
+      if (userOnChainBalance < paymentValue) {
+        const needFormatted = formatApay(paymentValue);
+        const userFormatted = formatApay(userOnChainBalance);
+        activity(
+          "payment.x402_fail",
+          {
+            path: fullPath,
+            reason: `insufficient on-chain balance: user has ${userFormatted}, requires ${needFormatted}`,
+          },
+          "warn"
+        );
+        return res.status(402).json({
+          error: `Insufficient $APAY balance on-chain: wallet has ${userFormatted} APAY, required ${needFormatted} APAY`,
+          requiredAmount: paymentValue.toString(),
+          requiredAmountFormatted: needFormatted,
+          userBalance: userOnChainBalance.toString(),
+          userBalanceFormatted: userFormatted,
+          network: activeBotChainCaip,
+        });
+      }
 
       // After handler flushes response, settle on-chain via BOF (non-blocking)
       res.on("finish", () => {
