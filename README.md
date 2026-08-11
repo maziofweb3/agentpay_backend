@@ -2,7 +2,7 @@
 
 > Express.js API gateway for the [AgentPay AI](https://agentpayfrontend.vercel.app) platform — AI inference gated by on-chain USDT payments on BotChain.
 
-**Live API:** https://agentpay-backend-eight.vercel.app  
+**Live API:** https://agentpay-backend-c7c5.onrender.com/health  
 **Frontend:** https://agentpayfrontend.vercel.app  
 **GitHub Org:** https://github.com/agentpay-ai
 
