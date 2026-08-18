@@ -1,50 +1,51 @@
-# AgentPay AI — Backend API
+# AgentPay AI — Backend Gateway API
 
-> Express.js API gateway for the [AgentPay AI](https://agentpayfrontend.vercel.app) platform — AI inference gated by on-chain USDT payments on BotChain.
+> Express.js API gateway for the [AgentPay AI](https://www.agentpayai.online) platform — AI inference aggregation, dynamic token-exact billing, and gasless micropayments on BotChain.
 
-**Live API:** https://agentpay-backend-c7c5.onrender.com/health  
-**Frontend:** https://agentpayfrontend.vercel.app  
-**GitHub Org:** https://github.com/agentpay-ai
+**Live API:** [https://agentpay-backend-c7c5.onrender.com](https://agentpay-backend-c7c5.onrender.com)  
+**Frontend:** [https://www.agentpayai.online](https://www.agentpayai.online)  
+**BOF Facilitator:** [https://bof-facilitator.onrender.com](https://bof-facilitator.onrender.com)  
+**GitHub Org:** [https://github.com/agentpay-ai](https://github.com/agentpay-ai)
 
 ---
 
 ## What it does
 
-The backend is an Express.js server deployed on Vercel that:
+The backend gateway is an Express.js engine hosted on Render that:
 
-- Accepts AI requests (chat, image, code) and gates them behind on-chain USDT payment verification
-- Supports three payment methods:
-  - **Per-request** — user submits a `X-AgentPay-Payment-Tx` header with a real on-chain USDT transfer tx hash
-  - **Prepaid session** — user deposits USDT once, receives a signed session token, uses it for multiple requests
-  - **x402** — standard HTTP 402 payment-required challenge/response flow
-- Proxies Claude (Anthropic) AI completions
-- Manages agent reputation via ERC-8004 on BotChain
-- Relays BotChain transactions
+1. **Dynamic Token-Exact Billing**: Calculates prompt pricing dynamically based on raw character/token counts, vendor rate cards (Gemini 3.6 Flash / Claude 3.5 Sonnet / Imagen 3), live APAY token market pricing, and a fixed **50% protocol profit margin**.
+2. **Off-Chain Verification with BOF**: Validates EIP-712 / EIP-3009 transfer authorizations instantly via the open-source Rust **[BOF (BotChain Open Facilitator)](https://github.com/agentpay-ai/BOF)** microservice before triggering AI execution.
+3. **Multi-Model AI Aggregation**: Dispatches prompt workloads to upstream AI providers:
+   - **Chat**: Google Gemini 3.6 Flash & Anthropic Claude 3.5 Sonnet
+   - **Code**: Anthropic Claude 3.5 Sonnet AST-level vulnerability auditing
+   - **Images**: Google Imagen 3 high-resolution generation
+4. **Asynchronous On-Chain Settlement**: Dispatches gasless settlement to BotChain EVM via BOF `/settle` asynchronously in the background, ensuring sub-second response times for end users.
+5. **Reputation & Attribution**: Manages ERC-8004 agent reputation tracking and ERC-8021 builder attribution.
 
 ---
 
 ## API Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Status, model info, payment config |
-| `POST` | `/api/chat` | Claude chat completion (payment-gated) |
-| `POST` | `/api/image` | Image generation (payment-gated) |
-| `POST` | `/api/code` | Code generation (payment-gated) |
-| `GET` | `/api/reputation/:address` | Agent reputation lookup |
-| `POST` | `/api/attribution` | Attribute a request to an agent |
-| `POST` | `/api/credits/deposit` | Verify on-chain USDT deposit → issue session token |
-| `POST` | `/api/botchain/relay` | Relay a signed BotChain transaction |
+| Method | Path | Billing Formula | Description |
+|---|---|---|---|
+| `GET` | `/health` | Free | Status, AI model registry, and payment configuration |
+| `GET` | `/api/price` | Free | Dynamic single source of truth for live APAY and service pricing |
+| `POST` | `/api/chat` | Token-exact + 50% Profit | Conversational AI text completions |
+| `POST` | `/api/code` | Token-exact + 50% Profit | Smart contract security audit & vulnerability detection |
+| `POST` | `/api/image` | Fixed Cost + 50% Profit | Image generation via Google Imagen 3 |
+| `GET` | `/api/reputation/:address` | Free | Agent reputation score lookup |
+| `POST` | `/api/reputation/rate` | Free | Submit rating for an autonomous agent |
+| `POST` | `/api/botchain/relay` | Token-exact + 50% Profit | Programmatic machine-to-machine task relay |
 
 ---
 
 ## Tech Stack
 
-- **Runtime**: Node.js + Express.js
-- **AI**: Anthropic Claude (`claude-opus-5`) via `@anthropic-ai/sdk`
-- **Payments**: `@x402/express` middleware + direct USDT transfer verification
-- **Chain**: BotChain (EVM-compatible, chain IDs 968 / 677)
-- **Deployment**: Vercel (serverless)
+- **Runtime**: Node.js + Express.js + TypeScript
+- **AI SDKs**: `@google/genai` (Gemini & Imagen) + `@anthropic-ai/sdk` (Claude)
+- **Facilitator**: Rust BOF Microservice (`https://bof-facilitator.onrender.com`)
+- **Networks**: BotChain Mainnet (Chain ID `677`) & BotChain Testnet (Chain ID `968`)
+- **Hosting**: Render Cloud
 
 ---
 
@@ -54,26 +55,6 @@ The backend is an Express.js server deployed on Vercel that:
 git clone https://github.com/agentpay-ai/agentpay_backend
 cd agentpay_backend
 npm install
-cp .env.example .env   # fill in your keys
-npm run dev            # starts on http://localhost:3001
+cp .env.example .env.local   # populate API keys
+npm run dev                  # starts on http://localhost:3001
 ```
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key |
-| `ANTHROPIC_MODEL` | Model override (default: `claude-opus-5`) |
-| `ANTHROPIC_BASE_URL` | Override AI base URL (default: `https://api.anthropic.com`) |
-| `X402_NETWORK` | `testnet` or `mainnet` |
-| `X402_API_KEY` | x402 facilitator API key |
-| `PAYMENT_RECIPIENT_ADDRESS` | Vault address that receives USDT |
-| `BOTCHAIN_RPC_URL` | BotChain RPC endpoint |
-| `SESSION_SECRET` | HMAC secret for prepaid session tokens |
-
----
-
-## Related
-
-- **Frontend repo**: [agentpay-ai/agentpay_frontend](https://github.com/agentpay-ai/agentpay_frontend)
-- **Live site**: https://agentpayfrontend.vercel.app
